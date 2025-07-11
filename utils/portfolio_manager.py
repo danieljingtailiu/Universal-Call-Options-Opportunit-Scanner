@@ -18,8 +18,8 @@ class PortfolioManager:
     def __init__(self, config, portfolio_file: str = 'data/portfolio.json'):
         self.config = config
         self.portfolio_file = portfolio_file
-        self.positions = self._load_portfolio()
         self.initial_capital = 100000  # $100k starting capital
+        self.positions = self._load_portfolio()
         self.cash = self.positions.get('cash', self.initial_capital)
         
     def _load_portfolio(self) -> Dict:
