@@ -247,7 +247,7 @@ class DataFetcher:
         
         # Process in batches to avoid overwhelming the API
         batch_size = 50
-        max_workers = 10
+        max_workers = 5
         
         for i in range(0, len(unique_tickers), batch_size):
             batch = unique_tickers[i:i + batch_size]

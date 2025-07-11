@@ -14,8 +14,8 @@ class TradingConfig:
     market_cap_max: float = 10_000_000_000  # $10B
     
     # Options parameters
-    min_days_to_expiration: int = 30
-    max_days_to_expiration: int = 60
+    min_days_to_expiration: int = 7
+    max_days_to_expiration: int = 365
     target_days_to_expiration: int = 45
     
     # Risk parameters
@@ -179,8 +179,8 @@ EXAMPLE_CONFIG_JSON = {
     "trading": {
         "market_cap_min": 500000000,
         "market_cap_max": 10000000000,
-        "min_days_to_expiration": 30,
-        "max_days_to_expiration": 60,
+        "min_days_to_expiration": 7,
+        "max_days_to_expiration": 365,
         "target_days_to_expiration": 45,
         "max_position_size": 0.05,
         "max_portfolio_risk": 0.20,

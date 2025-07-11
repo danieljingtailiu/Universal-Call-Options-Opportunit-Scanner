@@ -1,0 +1,34 @@
+{
+  "date": "2025-07-11",
+  "portfolio_value": 100000,
+  "open_positions": [],
+  "closed_today": [],
+  "performance": {
+    "daily_pnl": 0,
+    "total_pnl": 0,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "win_rate": 0,
+    "average_win": 0,
+    "average_loss": 0,
+    "profit_factor": Infinity,
+    "current_equity": 100000,
+    "return_percent": 0.0
+  },
+  "risk_metrics": {
+    "total_risk_percent": 0,
+    "var_95": 0,
+    "cvar_95": 0,
+    "max_drawdown": 0,
+    "sharpe_ratio": 0,
+    "sortino_ratio": 0,
+    "calmar_ratio": 0,
+    "position_count": 0,
+    "avg_position_size": 0,
+    "largest_position_pct": 0,
+    "correlation_risk": 0,
+    "theta_risk": 0,
+    "positions_at_risk": []
+  }
+}

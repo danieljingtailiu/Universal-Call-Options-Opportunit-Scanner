@@ -219,23 +219,23 @@ class MarketScanner:
         """Check if stock has bullish technical setup"""
         # RSI not overbought
         if technicals['rsi'] > self.config.trading.rsi_overbought:
-            print("Filtered out: RSI too high", technicals['rsi'])
+            logger.debug(f"Filtered out: RSI too high {technicals['rsi']}")
             return False
             
         # Price above moving averages
         current_price = technicals.get('current_price', technicals['sma_20'])
         if current_price < technicals['sma_20']:
-            print("Filtered out: Price below SMA 20", current_price, technicals['sma_20'])
+            logger.debug(f"Filtered out: Price below SMA 20 {current_price} {technicals['sma_20']}")
             return False
             
         # Good relative strength
         if technicals['relative_strength'] < self.config.scanner.min_relative_strength:
-            print("Filtered out: Relative strength too low", technicals['relative_strength'])
+            logger.debug(f"Filtered out: Relative strength too low {technicals['relative_strength']}")
             return False
             
         # Volume confirmation
         if technicals['volume_ratio'] < 1.2:  # 20% above average
-            print("Filtered out: Volume ratio too low", technicals['volume_ratio'])
+            logger.debug(f"Filtered out: Volume ratio too low {technicals['volume_ratio']}")
             return False
             
         # Bullish pattern or momentum
@@ -246,7 +246,7 @@ class MarketScanner:
         if technicals['price_change_5d'] > 0.05 and technicals['price_change_20d'] > 0.10:
             return True
             
-        print("Filtered out: No bullish pattern or momentum")
+        logger.debug("Filtered out: No bullish pattern or momentum")
         return False
 
 if __name__ == "__main__":
