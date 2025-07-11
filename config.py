@@ -1,0 +1,48 @@
+{
+  "trading": {
+    "market_cap_min": 500000000,
+    "market_cap_max": 10000000000,
+    "min_days_to_expiration": 30,
+    "max_days_to_expiration": 60,
+    "target_days_to_expiration": 45,
+    "max_position_size": 0.05,
+    "max_portfolio_risk": 0.20,
+    "stop_loss_percent": 0.30,
+    "take_profit_percent": 0.50,
+    "min_delta": 0.25,
+    "max_theta_decay_daily": 0.02,
+    "max_iv_percentile": 75,
+    "rsi_oversold": 30,
+    "rsi_overbought": 70,
+    "min_volume": 1000000,
+    "min_option_volume": 100,
+    "min_option_oi": 500,
+    "theta_exit_threshold": 0.03,
+    "profit_exit_threshold": 0.40,
+    "days_before_exp_exit": 7,
+    "iv_spike_exit": 1.5
+  },
+  "scanner": {
+    "patterns": [
+      "breakout",
+      "flag",
+      "ascending_triangle",
+      "cup_and_handle",
+      "momentum_surge"
+    ],
+    "min_revenue_growth": 0.10,
+    "min_earnings_growth": 0.05,
+    "max_pe_ratio": 50,
+    "min_institutional_ownership": 0.10,
+    "min_relative_strength": 0.60,
+    "min_price_above_ma": 0.02
+  },
+  "data": {
+    "yahoo_finance_enabled": True,
+    "quote_refresh_interval": 5,
+    "options_refresh_interval": 15,
+    "fundamentals_refresh_interval": 1440,
+    "use_cache": True,
+    "cache_expiry_minutes": 60
+  }
+}
