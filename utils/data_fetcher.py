@@ -330,22 +330,22 @@ class DataFetcher:
             if data.empty:
                 raise ValueError(f"No data available for {symbol}")
                 
-            current_price = data['Close'].iloc[-1]
-            volume = data['Volume'].sum()
+            current_price = float(data['Close'].iloc[-1])
+            volume = int(data['Volume'].sum())
             
             # Get additional info
             info = ticker.info
             
             return {
                 'symbol': symbol,
-                'price': current_price,
-                'volume': volume,
-                'avg_volume': info.get('averageVolume', volume),
-                'bid': info.get('bid', current_price),
-                'ask': info.get('ask', current_price),
-                'day_high': data['High'].max(),
-                'day_low': data['Low'].min(),
-                'prev_close': info.get('previousClose', current_price),
+                'price': float(current_price),
+                'volume': int(volume),
+                'avg_volume': int(info.get('averageVolume', volume)),
+                'bid': float(info.get('bid', current_price)),
+                'ask': float(info.get('ask', current_price)),
+                'day_high': float(data['High'].max()),
+                'day_low': float(data['Low'].min()),
+                'prev_close': float(info.get('previousClose', current_price)),
                 'timestamp': datetime.now().isoformat()
             }
             
