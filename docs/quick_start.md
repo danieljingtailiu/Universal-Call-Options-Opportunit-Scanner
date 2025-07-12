@@ -10,7 +10,7 @@
 
 ### Clone the Repository
 ```bash
-git clone https://github.com/yourusername/Market-Cap-Options-Tracker.git
+git clone https://github.com/danieljingtailiu/Market-Cap-Options-Tracker.git
 cd Market-Cap-Options-Tracker
 ```
 

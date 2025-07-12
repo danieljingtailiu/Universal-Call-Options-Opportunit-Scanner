@@ -525,8 +525,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📞 Support
 
-- **Issues**: [GitHub Issues](https://github.com/yourusername/Market-Cap-Options-Tracker/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/yourusername/Market-Cap-Options-Tracker/discussions)
+- **Issues**: [GitHub Issues](https://github.com/danieljingtailiu/Market-Cap-Options-Tracker/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/danieljingtailiu/Market-Cap-Options-Tracker/discussions)
 - **Email**: 1liudanieli8@gmail.com
 
 ## 📚 Documentation
