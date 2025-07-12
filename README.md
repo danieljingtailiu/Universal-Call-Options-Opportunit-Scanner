@@ -527,7 +527,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - **Issues**: [GitHub Issues](https://github.com/yourusername/Market-Cap-Options-Tracker/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/yourusername/Market-Cap-Options-Tracker/discussions)
-- **Email**: your.email@example.com
+- **Email**: 1liudanieli8@gmail.com
 
 ## 📚 Documentation
 
