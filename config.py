@@ -10,8 +10,8 @@ from typing import Dict, List, Optional
 @dataclass
 class TradingConfig:
     """Trading parameters configuration"""
-    market_cap_min: float = 500_000_000  # $500M
-    market_cap_max: float = 20_000_000_000  # $10B
+    market_cap_min: float = 1_000_000_000  # $1B - focus on more established companies
+    market_cap_max: float = 100_000_000_000  # $100B - allow larger companies
     
     # Options parameters
     min_days_to_expiration: int = 7
@@ -32,7 +32,7 @@ class TradingConfig:
     # Technical indicators
     rsi_oversold: float = 30
     rsi_overbought: float = 70
-    min_volume: int = 1_000_000  # Minimum daily volume
+    min_volume: int = 2_000_000  # Higher volume requirement for better liquidity
     min_option_volume: int = 100  # Minimum option volume
     min_option_oi: int = 500  # Minimum open interest
     
@@ -49,15 +49,15 @@ class ScannerConfig:
     # Technical patterns to look for
     patterns: List[str] = None
     
-    # Fundamental filters
-    min_revenue_growth: float = 0.10  # 10% revenue growth
-    min_earnings_growth: float = 0.05  # 5% earnings growth
-    max_pe_ratio: float = 50  # Maximum P/E ratio
-    min_institutional_ownership: float = 0.10  # 10% institutional ownership
+    # Fundamental filters - more stringent for growth
+    min_revenue_growth: float = 0.15  # 15% revenue growth (increased)
+    min_earnings_growth: float = 0.10  # 10% earnings growth (increased)
+    max_pe_ratio: float = 100  # Allow higher PEs for growth stocks
+    min_institutional_ownership: float = 0.05  # 5% institutional ownership
     
-    # Momentum indicators
-    min_relative_strength: float = 0.60  # RS vs market
-    min_price_above_ma: float = 0.02  # 2% above 20-day MA
+    # Momentum indicators - more stringent
+    min_relative_strength: float = 1.1  # Must outperform market by 10%
+    min_price_above_ma: float = 0.05  # 5% above 20-day MA (increased)
     
     def __post_init__(self):
         if self.patterns is None:
@@ -168,7 +168,47 @@ class Config:
         if not self.data.yahoo_finance_enabled and not self.data.polygon_api_key:
             issues.append("No data source configured")
             
+        # Additional validations
+        if self.trading.min_volume <= 0:
+            issues.append("min_volume must be positive")
+            
+        if self.trading.stop_loss_percent <= 0 or self.trading.stop_loss_percent > 1:
+            issues.append("stop_loss_percent must be between 0 and 1")
+            
+        if self.trading.take_profit_percent <= 0:
+            issues.append("take_profit_percent must be positive")
+            
+        # Check for reasonable defaults
+        if self.trading.market_cap_min < 100_000_000:  # $100M
+            issues.append("Warning: market_cap_min < $100M may include very illiquid stocks")
+            
+        if self.trading.max_days_to_expiration > 365:
+            issues.append("Warning: max_days_to_expiration > 365 days may have low liquidity")
+            
         return issues
+    
+    def get_safe_config(self) -> Dict:
+        """Get configuration with safe defaults for missing values"""
+        safe_config = {
+            'trading': asdict(self.trading),
+            'scanner': asdict(self.scanner),
+            'data': {k: v for k, v in asdict(self.data).items() 
+                    if not k.endswith('_key')}
+        }
+        
+        # Ensure all required fields exist
+        required_fields = {
+            'trading': ['market_cap_min', 'market_cap_max', 'min_volume', 'max_position_size'],
+            'scanner': ['max_pe_ratio', 'min_revenue_growth', 'min_earnings_growth'],
+            'data': ['yahoo_finance_enabled', 'use_cache']
+        }
+        
+        for section, fields in required_fields.items():
+            for field in fields:
+                if field not in safe_config[section]:
+                    logger.warning(f"Missing required field: {section}.{field}")
+        
+        return safe_config
 
 
 # Default configuration instance

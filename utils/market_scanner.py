@@ -3,6 +3,7 @@ Market Scanner module for finding small-cap opportunities
 """
 
 import logging
+import time
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
 import pandas as pd
@@ -19,43 +20,61 @@ class MarketScanner:
         self.data_fetcher = data_fetcher
         
     def find_small_caps(self) -> List[Dict]:
-        """Find all stocks with market cap between 500M-10B"""
-        logger.info("Scanning for small-cap stocks...")
+        """Find all stocks with market cap between configured min and max"""
+        logger.info("Scanning for stocks within market cap range...")
         
-        # Get all stocks with basic filters
+        # Get all stocks with basic filters using dynamic market cap range
         stocks = self.data_fetcher.get_stocks_by_market_cap(
             min_cap=self.config.trading.market_cap_min,
             max_cap=self.config.trading.market_cap_max,
             min_volume=self.config.trading.min_volume
         )
         
-        # Add additional data for each stock
+        # Add additional data for each stock in batches to avoid rate limits
         enriched_stocks = []
-        for stock in stocks:
-            try:
-                # Get current price and volume
-                quote = self.data_fetcher.get_quote(stock['symbol'])
-                
-                # Get basic fundamentals
-                fundamentals = self.data_fetcher.get_fundamentals(stock['symbol'])
-                
-                enriched_stock = {
-                    'symbol': stock['symbol'],
-                    'name': stock['name'],
-                    'market_cap': stock['market_cap'],
-                    'price': quote['price'],
-                    'volume': quote['volume'],
-                    'avg_volume': quote['avg_volume'],
-                    'pe_ratio': fundamentals.get('pe_ratio'),
-                    'revenue_growth': fundamentals.get('revenue_growth'),
-                    'earnings_growth': fundamentals.get('earnings_growth'),
-                    'institutional_ownership': fundamentals.get('institutional_ownership', 0)
-                }
-                
-                enriched_stocks.append(enriched_stock)
-                
-            except Exception as e:
-                logger.warning(f"Error enriching data for {stock['symbol']}: {e}")
+        batch_size = 3  # Process 3 stocks at a time to be very conservative
+        
+        logger.info(f"Enriching {len(stocks)} stocks with current data...")
+        
+        for i in range(0, len(stocks), batch_size):
+            batch = stocks[i:i + batch_size]
+            logger.info(f"Enriching batch {i//batch_size + 1}/{(len(stocks) + batch_size - 1)//batch_size}")
+            
+            for stock in batch:
+                try:
+                    # Get current price and volume
+                    quote = self.data_fetcher.get_quote(stock['symbol'])
+                    
+                    # Get basic fundamentals
+                    fundamentals = self.data_fetcher.get_fundamentals(stock['symbol'])
+                    
+                    enriched_stock = {
+                        'symbol': stock['symbol'],
+                        'name': stock['name'],
+                        'market_cap': stock['market_cap'],
+                        'price': quote['price'],
+                        'volume': quote['volume'],
+                        'avg_volume': quote['avg_volume'],
+                        'pe_ratio': fundamentals.get('pe_ratio'),
+                        'revenue_growth': fundamentals.get('revenue_growth'),
+                        'earnings_growth': fundamentals.get('earnings_growth'),
+                        'institutional_ownership': fundamentals.get('institutional_ownership', 0),
+                        'sector': stock.get('sector', 'Unknown'),
+                        'industry': stock.get('industry', 'Unknown'),
+                        'market_cap_category': stock.get('market_cap_category', 'unknown')
+                    }
+                    
+                    enriched_stocks.append(enriched_stock)
+                    
+                except Exception as e:
+                    logger.warning(f"Error enriching data for {stock['symbol']}: {e}")
+                    continue
+            
+            # Rate limiting between batches
+            if i + batch_size < len(stocks):
+                time.sleep(5)  # 5 second delay between batches
+        
+        logger.info(f"Successfully enriched {len(enriched_stocks)} stocks")
                 
         return enriched_stocks
     
@@ -86,23 +105,23 @@ class MarketScanner:
         return filtered
     
     def _passes_fundamental_filters(self, stock: Dict) -> bool:
-        """Check if stock passes fundamental criteria"""
-        # PE Ratio check
+        """Check if stock passes fundamental criteria with growth focus"""
+        # PE Ratio check - allow higher PEs for growth stocks
         if stock.get('pe_ratio'):
-            if stock['pe_ratio'] > self.config.scanner.max_pe_ratio or stock['pe_ratio'] < 0:
+            if stock['pe_ratio'] > 100 or stock['pe_ratio'] < 0:  # Allow high PEs for growth
                 return False
                 
-        # Growth checks
+        # Growth checks - require strong growth
         if stock.get('revenue_growth'):
-            if stock['revenue_growth'] < self.config.scanner.min_revenue_growth:
+            if stock['revenue_growth'] < 0.15:  # Require 15%+ revenue growth
                 return False
                 
         if stock.get('earnings_growth'):
-            if stock['earnings_growth'] < self.config.scanner.min_earnings_growth:
+            if stock['earnings_growth'] < 0.10:  # Require 10%+ earnings growth
                 return False
                 
-        # Institutional ownership
-        if stock.get('institutional_ownership', 0) < self.config.scanner.min_institutional_ownership:
+        # Institutional ownership - want some institutional interest
+        if stock.get('institutional_ownership', 0) < 0.05:  # At least 5%
             return False
             
         return True
@@ -216,38 +235,28 @@ class MarketScanner:
         return low_trend > 0 and high_std < np.mean(highs) * 0.02
     
     def _has_bullish_setup(self, technicals: Dict) -> bool:
-        """Check if stock has bullish technical setup"""
-        # RSI not overbought
-        if technicals['rsi'] > self.config.trading.rsi_overbought:
-            logger.debug(f"Filtered out: RSI too high {technicals['rsi']}")
+        """Check for bullish technical setup with momentum focus"""
+        # Require strong momentum indicators
+        if technicals.get('relative_strength', 1) < 1.1:  # Must outperform market
             return False
             
         # Price above moving averages
-        current_price = technicals.get('current_price', technicals['sma_20'])
-        if current_price < technicals['sma_20']:
-            logger.debug(f"Filtered out: Price below SMA 20 {current_price} {technicals['sma_20']}")
-            return False
-            
-        # Good relative strength
-        if technicals['relative_strength'] < self.config.scanner.min_relative_strength:
-            logger.debug(f"Filtered out: Relative strength too low {technicals['relative_strength']}")
+        if technicals.get('price_change_20d', 0) < 0.05:  # 5% above 20-day MA
             return False
             
         # Volume confirmation
-        if technicals['volume_ratio'] < 1.2:  # 20% above average
-            logger.debug(f"Filtered out: Volume ratio too low {technicals['volume_ratio']}")
+        if technicals.get('volume_ratio', 1) < 1.2:  # 20% above average volume
             return False
             
-        # Bullish pattern or momentum
-        if technicals['pattern'] in ['breakout', 'flag', 'ascending_triangle']:
-            return True
+        # RSI not overbought
+        if technicals.get('rsi', 50) > 80:  # Avoid overbought
+            return False
             
-        # Strong momentum
-        if technicals['price_change_5d'] > 0.05 and technicals['price_change_20d'] > 0.10:
-            return True
+        # Positive price momentum
+        if technicals.get('price_change_5d', 0) < 0.02:  # 2% up in 5 days
+            return False
             
-        logger.debug("Filtered out: No bullish pattern or momentum")
-        return False
+        return True
 
 if __name__ == "__main__":
     # Dummy config and data_fetcher for testing

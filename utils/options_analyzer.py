@@ -97,15 +97,15 @@ class OptionsAnalyzer:
                     
                     scored_options.append(recommendation)
             
-            # Sort by score and return top 3
+            # Sort by score and return only the best option per stock
             scored_options.sort(key=lambda x: x['score'], reverse=True)
-            top_recommendations = scored_options[:3]
+            best_recommendation = scored_options[0] if scored_options else None
             
-            # Print detailed recommendations
-            if top_recommendations:
-                self._print_recommendations(symbol, current_price, top_recommendations)
+            # Print detailed recommendations (disabled to avoid duplication)
+            if best_recommendation:
+                self._print_recommendations(symbol, current_price, [best_recommendation])
             
-            return top_recommendations
+            return [best_recommendation] if best_recommendation else []
             
         except Exception as e:
             logger.error(f"Error analyzing options for {stock['symbol']}: {e}")
@@ -113,142 +113,199 @@ class OptionsAnalyzer:
     
     def _score_option_comprehensive(self, option: Dict, current_price: float, 
                                    stock: Dict) -> Tuple[float, Dict]:
-        """Comprehensive scoring system for options"""
+        """Comprehensive scoring system for options with better reasoning"""
         score = 0
         reasons = []
         analysis = {}
         
-        # 1. Moneyness Score (20 points)
-        moneyness = (option['strike'] - current_price) / current_price
-        if 0 <= moneyness <= 0.05:  # ATM to slightly OTM
-            score += 20
-            reasons.append(f"Ideal strike near money (${option['strike']})")
-        elif 0.05 < moneyness <= 0.10:
-            score += 15
-            reasons.append(f"Good OTM strike (${option['strike']})")
-        elif -0.05 <= moneyness < 0:  # Slightly ITM
-            score += 10
-            reasons.append(f"Slightly ITM (${option['strike']})")
+        # Get option value analysis
+        value_analysis = self._calculate_option_value_analysis(current_price, option)
         
-        # 2. Time Value Score (15 points)
-        days = option['days_to_expiration']
-        if 30 <= days <= 45:
+        # 1. Moneyness Score (25 points) - Most important for call options
+        moneyness = value_analysis.get('moneyness', 1.0)
+        if 0.95 <= moneyness <= 1.05:  # ATM to slightly OTM - optimal for calls
+            score += 25
+            reasons.append(f"Optimal strike near money (${option['strike']:.2f})")
+        elif 1.05 < moneyness <= 1.15:  # Slightly OTM - good for momentum
+            score += 20
+            reasons.append(f"Good OTM strike for momentum (${option['strike']:.2f})")
+        elif 0.90 <= moneyness < 0.95:  # Slightly ITM - safer
+            score += 18
+            reasons.append(f"Slightly ITM with intrinsic value (${option['strike']:.2f})")
+        elif 1.15 < moneyness <= 1.25:  # Further OTM - higher risk/reward
             score += 15
-            reasons.append(f"Optimal expiration ({days} days)")
-        elif 25 <= days < 30 or 45 < days <= 60:
+            reasons.append(f"Further OTM for higher leverage (${option['strike']:.2f})")
+        elif moneyness < 0.90:  # Deep ITM - expensive
             score += 10
+            reasons.append(f"Deep ITM - expensive but safer (${option['strike']:.2f})")
+        elif moneyness > 1.25:  # Far OTM - very risky
+            score += 5
+            reasons.append(f"Far OTM - high risk (${option['strike']:.2f})")
+        
+        # 2. Time Value Analysis (20 points)
+        time_value_pct = value_analysis.get('time_value_pct', 50)
+        days = option['days_to_expiration']
+        
+        if 30 <= days <= 45 and time_value_pct < 80:  # Optimal time decay
+            score += 20
+            reasons.append(f"Optimal expiration ({days} days) with reasonable time value")
+        elif 25 <= days < 30 or 45 < days <= 60:
+            score += 15
             reasons.append(f"Good expiration ({days} days)")
         elif 20 <= days < 25 or 60 < days <= 70:
+            score += 10
+            reasons.append(f"Acceptable expiration ({days} days)")
+        elif days < 20:
             score += 5
+            reasons.append(f"Short expiration ({days} days) - high theta risk")
+        elif days > 70:
+            score += 8
+            reasons.append(f"Long expiration ({days} days) - expensive time value")
         
-        # 3. Liquidity Score (25 points)
-        liquidity_score = option.get('liquidity_score', 0)
-        normalized_liquidity = min(liquidity_score / 100 * 25, 25)
+        # 3. Liquidity Score (20 points)
+        liquidity_score = value_analysis.get('liquidity_score', 0)
+        volume = option.get('volume', 0)
+        open_interest = option.get('open_interest', 0)
+        spread_pct = option.get('spread_pct', 0.5)
+        
+        # Normalize liquidity score
+        normalized_liquidity = min(liquidity_score / 100 * 20, 20)
         score += normalized_liquidity
         
-        if option['volume'] > 100:
-            reasons.append(f"High volume ({option['volume']})")
-        elif option['volume'] > 10:
-            reasons.append(f"Decent volume ({option['volume']})")
-        elif option['open_interest'] > 100:
-            reasons.append(f"Good open interest ({option['open_interest']})")
+        if volume > 100:
+            reasons.append(f"High volume ({volume}) - easy to trade")
+        elif volume > 10:
+            reasons.append(f"Decent volume ({volume}) - tradeable")
+        elif open_interest > 500:
+            reasons.append(f"High open interest ({open_interest}) - good liquidity")
+        elif open_interest > 100:
+            reasons.append(f"Good open interest ({open_interest})")
         
-        # 4. Greeks Score (20 points)
-        # Delta
-        if 0.25 <= option['delta'] <= 0.45:
-            score += 8
-            reasons.append(f"Good delta ({option['delta']:.2f})")
-        elif 0.20 <= option['delta'] < 0.25 or 0.45 < option['delta'] <= 0.55:
-            score += 5
-        
-        # Theta (want low theta relative to price)
-        theta_ratio = abs(option['theta']) / (option['ask'] if option['ask'] > 0 else 0.01)
-        if theta_ratio < 0.02:  # Less than 2% daily decay
-            score += 7
-            reasons.append(f"Low theta decay ({abs(option['theta']):.3f})")
-        elif theta_ratio < 0.03:
-            score += 4
-        
-        # Gamma (moderate gamma is good)
-        if 0.01 <= option['gamma'] <= 0.05:
-            score += 5
-        
-        # 5. Volatility Score (10 points)
-        iv = option['implied_volatility']
-        if 0.3 <= iv <= 0.6:  # Moderate IV
-            score += 10
-            reasons.append(f"Reasonable IV ({iv:.1%})")
-        elif 0.2 <= iv < 0.3 or 0.6 < iv <= 0.8:
-            score += 5
-        
-        # 6. Spread Score (10 points)
-        spread_pct = option['spread_pct']
-        if spread_pct <= 0.10:  # Tight spread
-            score += 10
+        if spread_pct < 0.1:
             reasons.append("Tight bid-ask spread")
-        elif spread_pct <= 0.20:
-            score += 7
+        elif spread_pct < 0.2:
             reasons.append("Acceptable spread")
-        elif spread_pct <= 0.35:
+        elif spread_pct < 0.35:
+            reasons.append("Wide spread but tradeable")
+        
+        # 4. Greeks Score (15 points)
+        delta = option.get('delta', 0.5)
+        theta = option.get('theta', -0.01)
+        gamma = option.get('gamma', 0.01)
+        
+        # Delta analysis
+        if 0.25 <= delta <= 0.45:  # Sweet spot for calls
+            score += 8
+            reasons.append(f"Good delta ({delta:.2f}) - balanced risk/reward")
+        elif 0.20 <= delta < 0.25 or 0.45 < delta <= 0.55:
+            score += 6
+            reasons.append(f"Acceptable delta ({delta:.2f})")
+        elif delta > 0.55:  # High delta - expensive
             score += 4
-        elif spread_pct <= 0.50:
+            reasons.append(f"High delta ({delta:.2f}) - expensive but safer")
+        elif delta < 0.20:  # Low delta - risky
+            score += 3
+            reasons.append(f"Low delta ({delta:.2f}) - high leverage")
+        
+        # Theta analysis (want low theta relative to price)
+        theta_ratio = abs(theta) / (option['ask'] if option['ask'] > 0 else 0.01)
+        if theta_ratio < 0.02:  # Less than 2% daily decay
+            score += 4
+            reasons.append(f"Low theta decay ({abs(theta):.3f})")
+        elif theta_ratio < 0.03:
             score += 2
+            reasons.append(f"Moderate theta decay ({abs(theta):.3f})")
+        elif theta_ratio > 0.05:
+            score -= 2
+            reasons.append(f"High theta decay ({abs(theta):.3f}) - time decay risk")
+        
+        # Gamma analysis
+        if 0.01 <= gamma <= 0.05:
+            score += 3
+            reasons.append(f"Good gamma ({gamma:.3f}) - responsive to stock moves")
+        
+        # 5. Volatility Analysis (10 points)
+        iv = option.get('implied_volatility', 0.3)
+        iv_percentile = option.get('iv_percentile', 50)
+        
+        if 0.3 <= iv <= 0.6 and 30 <= iv_percentile <= 70:  # Moderate IV
+            score += 10
+            reasons.append(f"Reasonable IV ({iv:.1%}) - not overpriced")
+        elif 0.2 <= iv < 0.3 or 0.6 < iv <= 0.8:
+            score += 7
+            reasons.append(f"Acceptable IV ({iv:.1%})")
+        elif iv > 0.8 or iv_percentile > 80:
+            score += 3
+            reasons.append(f"High IV ({iv:.1%}) - expensive but potential for IV crush")
+        elif iv < 0.2 or iv_percentile < 20:
+            score += 5
+            reasons.append(f"Low IV ({iv:.1%}) - cheap but low volatility")
+        
+        # 6. Expected Return Analysis (10 points)
+        expected_return = self._calculate_expected_return(current_price, option, stock.get('atr', current_price * 0.02))
+        
+        if expected_return > 0.3:
+            score += 10
+            reasons.append(f"High expected return ({expected_return:.1%})")
+        elif expected_return > 0.1:
+            score += 7
+            reasons.append(f"Good expected return ({expected_return:.1%})")
+        elif expected_return > 0:
+            score += 4
+            reasons.append(f"Positive expected return ({expected_return:.1%})")
+        elif expected_return > -0.2:
+            score += 2
+            reasons.append(f"Moderate expected return ({expected_return:.1%})")
+        else:
+            score -= 5
+            reasons.append(f"Poor expected return ({expected_return:.1%})")
         
         # 7. Technical Setup Bonus (up to 10 points)
         if stock.get('rsi', 50) < 40:
             score += 5
-            reasons.append("Oversold RSI")
+            reasons.append("Oversold RSI - potential bounce")
         
         if stock.get('relative_strength', 1) > 1.2:
             score += 5
-            reasons.append("Strong relative strength")
+            reasons.append("Strong relative strength vs market")
+        
+        # 8. Risk/Reward Analysis (10 points)
+        risk_reward = self._calculate_risk_reward(option)
+        
+        if risk_reward > 2.0:
+            score += 10
+            reasons.append(f"Excellent risk/reward ratio ({risk_reward:.1f})")
+        elif risk_reward > 1.5:
+            score += 8
+            reasons.append(f"Good risk/reward ratio ({risk_reward:.1f})")
+        elif risk_reward > 1.0:
+            score += 5
+            reasons.append(f"Acceptable risk/reward ratio ({risk_reward:.1f})")
+        elif risk_reward > 0.5:
+            score += 2
+            reasons.append(f"Moderate risk/reward ratio ({risk_reward:.1f})")
         
         # Compile analysis
         analysis = {
             'total_score': score,
             'moneyness': moneyness,
             'reasons': reasons,
-            'liquidity_assessment': 'Good' if liquidity_score > 50 else 'Fair' if liquidity_score > 30 else 'Low',
-            'risk_assessment': 'Low' if score > 70 else 'Medium' if score > 50 else 'High'
+            'liquidity_assessment': 'Excellent' if liquidity_score > 80 else 'Good' if liquidity_score > 60 else 'Fair' if liquidity_score > 40 else 'Poor',
+            'risk_assessment': 'Low' if score > 80 else 'Medium' if score > 60 else 'High' if score > 40 else 'Very High',
+            'expected_return': expected_return,
+            'risk_reward_ratio': risk_reward,
+            'time_value_pct': time_value_pct,
+            'iv_rank': value_analysis.get('iv_rank', 'Normal')
         }
         
         return score, analysis
     
     def _print_recommendations(self, symbol: str, current_price: float, 
                               recommendations: List[Dict]):
-        """Print detailed recommendations in a user-friendly format"""
-        print("\n" + "="*80)
-        print(f"OPTIONS RECOMMENDATIONS FOR {symbol}")
-        print(f"Current Stock Price: ${current_price:.2f}")
-        print("="*80)
-        
-        for i, rec in enumerate(recommendations, 1):
-            print(f"\n--- Recommendation #{i} (Score: {rec['score']:.1f}/100) ---")
-            print(f"CALL Option: ${rec['strike']} Strike")
-            print(f"Expiration: {rec['expiration']} ({rec['days_to_expiration']} days)")
-            print(f"Entry Price: ${rec['entry_price']:.2f} (Ask: ${rec['ask_price']:.2f}, Bid: ${rec['bid_price']:.2f})")
-            
-            print(f"\nKey Metrics:")
-            print(f"  • Delta: {rec['delta']:.3f}")
-            print(f"  • Theta: ${rec['theta']:.3f}/day")
-            print(f"  • IV: {rec['implied_volatility']:.1%}")
-            print(f"  • Volume: {rec['volume']} | Open Interest: {rec['open_interest']}")
-            print(f"  • Probability of Profit: {rec['probability_of_profit']:.1%}")
-            print(f"  • Expected Return: {rec['expected_return']:.1%}")
-            
-            print(f"\nTrading Plan:")
-            print(f"  • Entry: ${rec['entry_price']:.2f}")
-            print(f"  • Stop Loss: ${rec['stop_loss']:.2f} (-50%)")
-            print(f"  • Target 1: ${rec['target_1']:.2f} (+50%)")
-            print(f"  • Target 2: ${rec['target_2']:.2f} (+100%)")
-            
-            print(f"\nReasons to Buy:")
-            for reason in rec['recommendation_reasons']:
-                print(f"  + {reason}")
-        
-        print("\n" + "="*80)
-        print("Would you like to monitor any of these positions? (Enter 1, 2, 3, or 'n' for none)")
-        
+        """Print simplified recommendations with essential info only"""
+        # Only print if verbose mode is enabled (disabled by default to avoid duplication)
+        return
+    
     def add_to_monitoring(self, recommendation: Dict, contracts: int = 1):
         """Add position to monitoring list"""
         position_id = f"{recommendation['symbol']}_{recommendation['strike']}_{recommendation['expiration']}"
@@ -419,47 +476,220 @@ class OptionsAnalyzer:
         
     def _calculate_probability_of_profit(self, spot: float, strike: float, 
                                        days: int, iv: float, premium: float) -> float:
-        """Calculate probability of profit for a call option"""
-        # Break-even price
-        breakeven = strike + premium
-        
-        # Use log-normal distribution
-        time_to_exp = days / 365.0
-        
-        # Expected return (neutral assumption)
-        drift = 0.0
-        
-        # Calculate probability
+        """Calculate probability of profit for a call option using Black-Scholes"""
         try:
+            # Break-even price for call option
+            breakeven = strike + premium
+            
+            # Use Black-Scholes probability calculation
+            time_to_exp = days / 365.0
+            risk_free_rate = 0.04  # 4% annual rate
+            
+            # Calculate d1 for probability
             variance = (iv ** 2) * time_to_exp
-            d1 = (np.log(spot / breakeven) + drift + 0.5 * variance) / np.sqrt(variance)
+            d1 = (np.log(spot / breakeven) + (risk_free_rate + 0.5 * variance) * time_to_exp) / np.sqrt(variance)
+            
+            # Probability of profit is N(d1)
             prob = norm.cdf(d1)
-            return prob
-        except:
-            return 0.5  # Default 50%
+            
+            # Ensure reasonable bounds
+            return max(0.05, min(0.95, prob))
+            
+        except Exception as e:
+            logger.debug(f"Error calculating probability: {e}")
+            # Fallback calculation
+            moneyness = spot / strike
+            if moneyness > 1.1:  # ITM
+                return 0.7
+            elif moneyness > 0.95:  # Near ATM
+                return 0.5
+            else:  # OTM
+                return 0.3
     
     def _calculate_expected_return(self, spot: float, contract: Dict, atr: float) -> float:
-        """Calculate expected return based on price targets"""
-        strike = contract['strike']
-        premium = contract['ask'] if contract['ask'] > 0 else contract['mid']
-        days = contract['days_to_expiration']
-        
-        # Expected move based on ATR and time
-        expected_move = atr * np.sqrt(days / 20)  # Scale ATR by time
-        expected_price = spot + expected_move * 0.6  # Conservative 60% of expected move
-        
-        if expected_price > strike:
-            profit = expected_price - strike - premium
-            return profit / premium if premium > 0 else 0
-        else:
-            return -1.0  # Total loss
+        """Calculate realistic expected return for call options"""
+        try:
+            strike = contract['strike']
+            premium = contract['ask'] if contract['ask'] > 0 else contract['mid']
+            days = contract['days_to_expiration']
+            iv = contract['implied_volatility']
+            
+            if premium <= 0:
+                return 0.0
+            
+            # Calculate moneyness
+            moneyness = spot / strike
+            
+            # Expected stock price movement based on IV and time
+            time_to_exp = days / 365.0
+            expected_stock_move = spot * iv * np.sqrt(time_to_exp) * 0.6  # Conservative 60% of IV move
+            
+            # Calculate potential scenarios
+            scenarios = []
+            
+            # Scenario 1: Stock moves up by expected amount
+            up_price = spot + expected_stock_move
+            if up_price > strike:
+                up_profit = up_price - strike - premium
+                up_return = up_profit / premium
+                scenarios.append(up_return * 0.4)  # 40% probability
+            
+            # Scenario 2: Stock moves up by 2x expected amount (breakout)
+            breakout_price = spot + expected_stock_move * 2
+            if breakout_price > strike:
+                breakout_profit = breakout_price - strike - premium
+                breakout_return = breakout_profit / premium
+                scenarios.append(breakout_return * 0.2)  # 20% probability
+            
+            # Scenario 3: Stock moves up slightly (50% of expected)
+            small_up_price = spot + expected_stock_move * 0.5
+            if small_up_price > strike:
+                small_profit = small_up_price - strike - premium
+                small_return = small_profit / premium
+                scenarios.append(small_return * 0.3)  # 30% probability
+            
+            # Scenario 4: Stock stays flat or moves down (loss)
+            if moneyness > 1.05:  # ITM options have some intrinsic value
+                intrinsic_value = spot - strike
+                if intrinsic_value > 0:
+                    scenarios.append((intrinsic_value - premium) / premium * 0.1)  # 10% probability
+                else:
+                    scenarios.append(-0.8 * 0.1)  # 80% loss probability
+            else:
+                scenarios.append(-0.9 * 0.1)  # 90% loss probability
+            
+            # Calculate weighted expected return
+            expected_return = sum(scenarios)
+            
+            # Ensure reasonable bounds
+            return max(-0.95, min(2.0, expected_return))
+            
+        except Exception as e:
+            logger.debug(f"Error calculating expected return: {e}")
+            # Simple fallback based on moneyness
+            moneyness = spot / strike
+            if moneyness > 1.1:
+                return 0.3  # ITM calls
+            elif moneyness > 0.95:
+                return 0.1  # Near ATM calls
+            else:
+                return -0.2  # OTM calls
     
     def _calculate_risk_reward(self, contract: Dict) -> float:
-        """Calculate risk/reward ratio"""
-        premium = contract['ask'] if contract['ask'] > 0 else contract['mid']
-        
-        # Potential profit at 50% option price increase
-        potential_profit = premium * 0.50
-        max_loss = premium
-        
-        return potential_profit / max_loss if max_loss > 0 else 0
+        """Calculate realistic risk/reward ratio for call options"""
+        try:
+            premium = contract['ask'] if contract['ask'] > 0 else contract['mid']
+            strike = contract['strike']
+            spot = contract.get('current_stock_price', 0)
+            
+            if premium <= 0 or spot <= 0:
+                return 0.0
+            
+            # Calculate potential profit scenarios
+            profit_scenarios = []
+            
+            # Scenario 1: 50% stock price increase
+            target_price_1 = spot * 1.5
+            if target_price_1 > strike:
+                profit_1 = target_price_1 - strike - premium
+                profit_scenarios.append(profit_1)
+            
+            # Scenario 2: 100% stock price increase (meme stock scenario)
+            target_price_2 = spot * 2.0
+            if target_price_2 > strike:
+                profit_2 = target_price_2 - strike - premium
+                profit_scenarios.append(profit_2)
+            
+            # Scenario 3: 25% stock price increase
+            target_price_3 = spot * 1.25
+            if target_price_3 > strike:
+                profit_3 = target_price_3 - strike - premium
+                profit_scenarios.append(profit_3)
+            
+            # Calculate average potential profit
+            if profit_scenarios:
+                avg_potential_profit = sum(profit_scenarios) / len(profit_scenarios)
+            else:
+                avg_potential_profit = 0
+            
+            # Maximum loss is the premium paid
+            max_loss = premium
+            
+            # Risk/reward ratio
+            if max_loss > 0:
+                return avg_potential_profit / max_loss
+            else:
+                return 0.0
+                
+        except Exception as e:
+            logger.debug(f"Error calculating risk/reward: {e}")
+            return 0.5  # Default conservative ratio
+    
+    def _calculate_option_value_analysis(self, spot: float, contract: Dict) -> Dict:
+        """Comprehensive option value analysis"""
+        try:
+            strike = contract['strike']
+            premium = contract['ask'] if contract['ask'] > 0 else contract['mid']
+            days = contract['days_to_expiration']
+            iv = contract['implied_volatility']
+            
+            # Moneyness analysis
+            moneyness = spot / strike
+            intrinsic_value = max(0, spot - strike)
+            time_value = premium - intrinsic_value
+            
+            # Greeks analysis (simplified)
+            delta = contract.get('delta', 0.5)
+            theta = contract.get('theta', -0.01)
+            gamma = contract.get('gamma', 0.01)
+            vega = contract.get('vega', 0.1)
+            
+            # Volatility analysis
+            iv_percentile = contract.get('iv_percentile', 50)
+            iv_rank = "Low" if iv_percentile < 30 else "High" if iv_percentile > 70 else "Normal"
+            
+            # Liquidity analysis
+            volume = contract.get('volume', 0)
+            open_interest = contract.get('open_interest', 0)
+            spread_pct = contract.get('spread_pct', 0.1)
+            
+            liquidity_score = 0
+            if volume > 100:
+                liquidity_score += 30
+            elif volume > 10:
+                liquidity_score += 20
+            
+            if open_interest > 500:
+                liquidity_score += 30
+            elif open_interest > 100:
+                liquidity_score += 20
+            
+            if spread_pct < 0.1:
+                liquidity_score += 40
+            elif spread_pct < 0.2:
+                liquidity_score += 20
+            
+            return {
+                'moneyness': moneyness,
+                'intrinsic_value': intrinsic_value,
+                'time_value': time_value,
+                'time_value_pct': (time_value / premium * 100) if premium > 0 else 0,
+                'delta': delta,
+                'theta': theta,
+                'gamma': gamma,
+                'vega': vega,
+                'iv_percentile': iv_percentile,
+                'iv_rank': iv_rank,
+                'liquidity_score': liquidity_score,
+                'volume': volume,
+                'open_interest': open_interest,
+                'spread_pct': spread_pct,
+                'days_to_expiration': days,
+                'premium': premium,
+                'strike': strike,
+                'spot_price': spot
+            }
+            
+        except Exception as e:
+            logger.debug(f"Error in option value analysis: {e}")
+            return {}

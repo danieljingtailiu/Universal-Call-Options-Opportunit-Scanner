@@ -18,8 +18,37 @@ import pickle
 from pathlib import Path
 from scipy.stats import norm
 import math
+import random
 
 logger = logging.getLogger(__name__)
+
+
+class RateLimiter:
+    """Simple rate limiter to prevent hitting API limits"""
+    
+    def __init__(self, max_requests_per_minute: int = 60):
+        self.max_requests = max_requests_per_minute
+        self.requests = []
+        
+    def wait_if_needed(self):
+        """Wait if we're hitting rate limits"""
+        now = time.time()
+        
+        # Remove requests older than 1 minute
+        self.requests = [req_time for req_time in self.requests if now - req_time < 60]
+        
+        if len(self.requests) >= self.max_requests:
+            sleep_time = 60 - (now - self.requests[0]) + 1
+            logger.info(f"Rate limit reached, sleeping for {sleep_time:.1f} seconds")
+            time.sleep(sleep_time)
+            self.requests = []
+        
+        self.requests.append(now)
+        
+    def add_jitter(self):
+        """Add random jitter to avoid synchronized requests"""
+        jitter = random.uniform(0.1, 0.5)
+        time.sleep(jitter)
 
 
 class DataFetcher:
@@ -32,6 +61,9 @@ class DataFetcher:
         self.cache_dir = Path("data/cache")
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         
+        # Rate limiter - much more conservative for overnight runs
+        self.rate_limiter = RateLimiter(max_requests_per_minute=10)  # Very conservative limit
+        
         # Session for HTTP requests
         self.session = requests.Session()
         self.session.headers.update({
@@ -43,6 +75,32 @@ class DataFetcher:
         self.min_option_oi = 10  # Minimum 10 open interest
         self.max_bid_ask_spread = 0.50  # Max 50% spread for low volume
         
+        # Retry settings
+        self.max_retries = 3
+        self.retry_delay = 2
+        
+    def _safe_yfinance_call(self, func, *args, **kwargs):
+        """Safely call yfinance functions with rate limiting and retries"""
+        for attempt in range(self.max_retries):
+            try:
+                self.rate_limiter.wait_if_needed()
+                result = func(*args, **kwargs)
+                self.rate_limiter.add_jitter()
+                return result
+            except Exception as e:
+                if "rate limit" in str(e).lower() or "429" in str(e):
+                    wait_time = (attempt + 1) * self.retry_delay * 2
+                    logger.warning(f"Rate limit hit, waiting {wait_time} seconds (attempt {attempt + 1})")
+                    time.sleep(wait_time)
+                    continue
+                elif attempt == self.max_retries - 1:
+                    raise
+                else:
+                    logger.warning(f"yfinance call failed, retrying: {e}")
+                    time.sleep(self.retry_delay)
+        
+        return None
+    
     def get_stocks_by_market_cap(self, min_cap: float, max_cap: float, 
                                  min_volume: int) -> List[Dict]:
         """Get stocks filtered by market cap and volume with RELAXED criteria"""
@@ -54,90 +112,78 @@ class DataFetcher:
         if cache_file.exists():
             cache_time = datetime.fromtimestamp(cache_file.stat().st_mtime)
             if (datetime.now() - cache_time).total_seconds() < cache_age_hours * 3600:
-                logger.info("Loading small-caps from cache")
+                logger.info("Loading stocks from cache")
                 with open(cache_file, 'rb') as f:
                     all_stocks = pickle.load(f)
-                    # Apply RELAXED filters
+                    # Apply filters
                     filtered = []
                     for s in all_stocks:
                         if min_cap <= s.get('market_cap', 0) <= max_cap:
-                            # RELAXED volume requirement
-                            if s.get('volume', 0) >= min_volume * 0.5:  # Allow 50% of min volume
+                            if s.get('volume', 0) >= min_volume * 0.3:  # Allow 30% of min volume
                                 filtered.append(s)
+                    logger.info(f"Found {len(filtered)} stocks in cache matching criteria")
                     return filtered
         
-        logger.info("Fetching fresh small-cap universe from online sources...")
+        logger.info("Fetching fresh stock universe from online sources...")
         
-        # Get high-quality small-cap list
-        quality_tickers = self._get_quality_small_caps()
+        # Get stock universe from multiple sources
+        all_tickers = set()
         
-        # Fetch from multiple sources
-        all_tickers = set(quality_tickers)
-        
-        # Add from other sources
+        # Source 1: NASDAQ screener (limit to 1000)
         nasdaq_tickers = self._fetch_nasdaq_screener()
-        all_tickers.update(nasdaq_tickers)
+        all_tickers.update(list(nasdaq_tickers)[:1000])
         
+        # Source 2: Yahoo Finance screener (limit to 500)
         yahoo_tickers = self._fetch_yahoo_screener()
-        all_tickers.update(yahoo_tickers)
+        all_tickers.update(list(yahoo_tickers)[:500])
+        
+        # Source 3: Add some known high-volume stocks for better coverage
+        known_high_volume = [
+            'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'TSLA', 'NVDA', 'AMD',
+            'NFLX', 'DIS', 'NKE', 'JPM', 'JNJ', 'PG', 'V', 'HD', 'MA', 'UNH',
+            'PYPL', 'ADBE', 'CRM', 'ABT', 'PFE', 'TMO', 'ACN', 'LLY', 'DHR',
+            'NEE', 'TXN', 'QCOM', 'HON', 'UNP', 'RTX', 'LOW', 'SPGI', 'ISRG',
+            'GILD', 'TGT', 'SBUX', 'INTU', 'ADI', 'AMAT', 'KLAC', 'LRCX',
+            'MU', 'WDC', 'STX', 'AVGO', 'MRVL', 'TXN', 'QCOM', 'ADI'
+        ]
+        all_tickers.update(known_high_volume)
         
         logger.info(f"Total unique tickers to verify: {len(all_tickers)}")
         
+        # Limit to first 1000 tickers to avoid rate limits
+        tickers_to_verify = list(all_tickers)[:1000]
+        logger.info(f"Limiting verification to first {len(tickers_to_verify)} tickers")
+        
         # Verify with relaxed criteria
-        verified_stocks = self._verify_and_enrich_tickers_relaxed(list(all_tickers), min_cap, max_cap)
+        verified_stocks = self._verify_and_enrich_tickers_dynamic(tickers_to_verify, min_cap, max_cap)
         
         # Cache the results
         with open(cache_file, 'wb') as f:
             pickle.dump(verified_stocks, f)
         
-        # Apply relaxed volume filter
+        # Apply volume filter
         filtered_stocks = []
         for s in verified_stocks:
-            # More lenient volume filtering
             if s.get('volume', 0) >= min_volume * 0.3:  # Allow 30% of min volume
                 filtered_stocks.append(s)
             elif s.get('avg_volume', 0) >= min_volume * 0.5:  # Or 50% of average volume
                 filtered_stocks.append(s)
         
-        logger.info(f"Returning {len(filtered_stocks)} stocks after relaxed filters")
+        logger.info(f"Returning {len(filtered_stocks)} stocks after filters")
         return filtered_stocks
     
-    def _get_quality_small_caps(self) -> List[str]:
-        """Get high-quality small-cap stocks that are likely to have options"""
-        # Focus on stocks with good options liquidity
-        quality_small_caps = [
-            # High-volume small caps with active options
-            'SOFI', 'HOOD', 'AFRM', 'UPST', 'OPEN', 'RKLB', 'IONQ', 'ASTS',
-            'PLTR', 'DKNG', 'COIN', 'MARA', 'RIOT', 'CLSK', 'HUT', 'BITF',
-            'CHPT', 'BLNK', 'EVGO', 'LCID', 'RIVN', 'NKLA', 'GOEV', 'FSR',
-            'SPCE', 'JOBY', 'LILM', 'ACHR', 'EVTL', 'ARCHER', 'BBAI', 'AI',
-            'PATH', 'DOCN', 'GTLB', 'S', 'CFLT', 'NET', 'DDOG', 'SNOW',
-            'CRWD', 'ZS', 'OKTA', 'TWLO', 'MDB', 'ESTC', 'FSLY', 'APPS',
-            'WISH', 'CLOV', 'SKLZ', 'FUBO', 'GENI', 'RSI', 'PENN', 'CZR',
-            'WYNN', 'MGM', 'CHWY', 'W', 'ETSY', 'SHOP', 'BIGC', 'CPNG',
-            'DASH', 'ABNB', 'LYFT', 'UBER', 'GRAB', 'SE', 'MELI', 'PINS',
-            'SNAP', 'MTCH', 'BMBL', 'RBLX', 'U', 'EA', 'TTWO', 'ATVI',
-            'ZM', 'DOCU', 'DBX', 'BOX', 'ASAN', 'MNDY', 'BILL', 'TOST',
-            'SQ', 'PYPL', 'AFRM', 'UPST', 'SOFI', 'HOOD', 'COMP', 'OPEN',
-            'NVAX', 'MRNA', 'BNTX', 'CVAC', 'INO', 'VXRT', 'ALT', 'OCGN',
-            'RUN', 'ENPH', 'SEDG', 'NOVA', 'MAXN', 'SPWR', 'CSIQ', 'JKS',
-            'PLUG', 'FCEL', 'BE', 'BLDP', 'CHPT', 'BLNK', 'EVGO', 'VLDR'
-        ]
-        
-        return quality_small_caps
-    
-    def _verify_and_enrich_tickers_relaxed(self, tickers: List[str], min_cap: float, max_cap: float) -> List[Dict]:
-        """Verify tickers with RELAXED criteria"""
+    def _verify_and_enrich_tickers_dynamic(self, tickers: List[str], min_cap: float, max_cap: float) -> List[Dict]:
+        """Verify tickers with dynamic criteria based on market cap range"""
         verified_stocks = []
         
-        logger.info(f"Verifying {len(tickers)} tickers with relaxed criteria...")
+        logger.info(f"Verifying {len(tickers)} tickers with market cap range ${min_cap/1e9:.1f}B - ${max_cap/1e9:.0f}B...")
         
         # Remove duplicates and sort
         unique_tickers = sorted(list(set(tickers)))
         
-        # Process in batches
-        batch_size = 50
-        max_workers = 10
+        # Process in batches - very conservative for overnight runs
+        batch_size = 5    # Very small batches
+        max_workers = 2   # Fewer workers
         
         for i in range(0, len(unique_tickers), batch_size):
             batch = unique_tickers[i:i + batch_size]
@@ -145,7 +191,7 @@ class DataFetcher:
             
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 future_to_ticker = {
-                    executor.submit(self._verify_single_ticker_relaxed, ticker, min_cap, max_cap): ticker 
+                    executor.submit(self._verify_single_ticker_dynamic, ticker, min_cap, max_cap): ticker 
                     for ticker in batch
                 }
                 
@@ -160,46 +206,64 @@ class DataFetcher:
             processed = min(i + batch_size, len(unique_tickers))
             logger.info(f"Verified {processed}/{len(unique_tickers)} tickers, found {len(verified_stocks)} valid stocks")
             
-            # Rate limiting
-            time.sleep(1)
+            # Rate limiting - much longer delay between batches for overnight runs
+            time.sleep(10)
         
         return verified_stocks
     
-    def _verify_single_ticker_relaxed(self, ticker: str, min_cap: float, max_cap: float) -> Optional[Dict]:
-        """Verify ticker with RELAXED criteria"""
+    def _verify_single_ticker_dynamic(self, ticker: str, min_cap: float, max_cap: float) -> Optional[Dict]:
+        """Verify ticker with dynamic criteria based on market cap"""
         try:
             # Skip if ticker has special characters
             if any(c in ticker for c in ['^', '.', '=', ' ', '/']):
                 return None
                 
             stock = yf.Ticker(ticker)
-            info = stock.info
+            
+            # Use safe call for info
+            info = self._safe_yfinance_call(lambda: stock.info)
+            if not info:
+                return None
             
             # Check if valid stock with market cap
             market_cap = info.get('marketCap', 0)
             if not market_cap or market_cap < min_cap or market_cap > max_cap:
                 return None
             
-            # Get recent price/volume data
-            hist = stock.history(period="5d")
-            if hist.empty:
+            # Get recent price/volume data with safe call
+            hist = self._safe_yfinance_call(lambda: stock.history(period="5d"))
+            if not hist or hist.empty:
                 return None
             
             current_price = hist['Close'].iloc[-1]
             avg_volume = hist['Volume'].mean()
             
-            # RELAXED: Allow stocks above $0.50 instead of $1
-            if current_price < 0.50:
+            # Dynamic price filter based on market cap
+            if market_cap < 5e9:  # Under $5B
+                min_price = 1.0
+            elif market_cap < 50e9:  # Under $50B
+                min_price = 0.50
+            else:  # Over $50B
+                min_price = 0.25
+            
+            if current_price < min_price:
                 return None
             
-            # RELAXED: Allow lower volume stocks that might have options
-            if avg_volume < 10000:  # Very low threshold
+            # Dynamic volume filter based on market cap
+            if market_cap < 1e9:  # Under $1B
+                min_volume = 100000
+            elif market_cap < 10e9:  # Under $10B
+                min_volume = 500000
+            else:  # Over $10B
+                min_volume = 1000000
+            
+            if avg_volume < min_volume:
                 return None
             
             # Check if has options (important!)
             try:
-                options_dates = stock.options
-                has_options = len(options_dates) > 0
+                options_dates = self._safe_yfinance_call(lambda: stock.options)
+                has_options = len(options_dates) > 0 if options_dates else False
             except:
                 has_options = False
             
@@ -214,12 +278,24 @@ class DataFetcher:
                 'exchange': info.get('exchange', 'Unknown'),
                 'pe_ratio': info.get('forwardPE'),
                 'has_options': has_options,
-                'options_expirations': len(options_dates) if has_options else 0
+                'options_expirations': len(options_dates) if has_options and options_dates else 0,
+                'market_cap_category': self._get_market_cap_category(market_cap)
             }
             
         except Exception as e:
             logger.debug(f"Error verifying {ticker}: {e}")
             return None
+    
+    def _get_market_cap_category(self, market_cap: float) -> str:
+        """Get market cap category for filtering"""
+        if market_cap < 1e9:
+            return 'small_cap'
+        elif market_cap < 10e9:
+            return 'mid_cap'
+        elif market_cap < 100e9:
+            return 'large_cap'
+        else:
+            return 'mega_cap'
     
     def get_options_chain(self, symbol: str) -> List[Dict]:
         """Get options chain with IMPROVED analysis for low-volume options"""
@@ -610,3 +686,131 @@ class DataFetcher:
             cache_file.unlink()
             
         logger.info("Data cache cleared")
+
+    def _validate_stock_data(self, stock_data: Dict) -> bool:
+        """Validate stock data for reasonableness"""
+        try:
+            # Check for required fields
+            required_fields = ['symbol', 'market_cap', 'price', 'volume']
+            for field in required_fields:
+                if field not in stock_data or stock_data[field] is None:
+                    return False
+            
+            # Sanity checks
+            if stock_data['price'] <= 0:
+                logger.debug(f"Invalid price for {stock_data['symbol']}: {stock_data['price']}")
+                return False
+                
+            if stock_data['market_cap'] <= 0:
+                logger.debug(f"Invalid market cap for {stock_data['symbol']}: {stock_data['market_cap']}")
+                return False
+                
+            if stock_data['volume'] < 0:
+                logger.debug(f"Invalid volume for {stock_data['symbol']}: {stock_data['volume']}")
+                return False
+            
+            # Check for reasonable ranges
+            if stock_data['price'] > 10000:  # $10k+ stocks are rare
+                logger.debug(f"Suspiciously high price for {stock_data['symbol']}: {stock_data['price']}")
+                return False
+                
+            if stock_data['market_cap'] > 1e12:  # $1T+ market cap
+                logger.debug(f"Suspiciously high market cap for {stock_data['symbol']}: {stock_data['market_cap']}")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            logger.debug(f"Error validating stock data: {e}")
+            return False
+    
+    def _validate_option_data(self, option_data: Dict) -> bool:
+        """Validate option data for reasonableness"""
+        try:
+            required_fields = ['strike', 'expiration', 'bid', 'ask', 'volume', 'open_interest']
+            for field in required_fields:
+                if field not in option_data or option_data[field] is None:
+                    return False
+            
+            # Sanity checks
+            if option_data['strike'] <= 0:
+                return False
+                
+            if option_data['bid'] < 0 or option_data['ask'] < 0:
+                return False
+                
+            if option_data['ask'] < option_data['bid']:
+                logger.debug(f"Ask < Bid for option: {option_data}")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            logger.debug(f"Error validating option data: {e}")
+            return False
+
+    def get_option_quote(self, symbol: str, strike: float, expiration: str, option_type: str = 'CALL') -> Optional[Dict]:
+        """Get current quote for a specific option contract"""
+        try:
+            ticker = yf.Ticker(symbol)
+            
+            # Get options chain for the expiration
+            opt_chain = self._safe_yfinance_call(lambda: ticker.option_chain(expiration))
+            if not opt_chain:
+                return None
+            
+            # Get the appropriate chain (calls or puts)
+            if option_type.upper() == 'CALL':
+                options = opt_chain.calls
+            else:
+                options = opt_chain.puts
+            
+            # Find the specific strike
+            option_data = options[options['strike'] == strike]
+            if option_data.empty:
+                return None
+            
+            option = option_data.iloc[0]
+            
+            # Get current stock price
+            current_price = self.get_quote(symbol)['price']
+            
+            # Calculate days to expiration
+            exp_date = datetime.strptime(expiration, '%Y-%m-%d')
+            days_to_exp = (exp_date - datetime.now()).days
+            
+            # Calculate spread
+            bid = option.get('bid', 0)
+            ask = option.get('ask', 0)
+            spread_pct = (ask - bid) / ask if ask > 0 else 1.0
+            
+            # Estimate Greeks if not available
+            iv = option.get('impliedVolatility', 0.3)
+            if iv == 0 or pd.isna(iv):
+                iv = 0.3  # Default IV
+            
+            return {
+                'symbol': symbol,
+                'strike': strike,
+                'expiration': expiration,
+                'type': option_type,
+                'bid': bid,
+                'ask': ask,
+                'mid': (bid + ask) / 2 if ask > 0 else option.get('lastPrice', 0),
+                'last': option.get('lastPrice', 0),
+                'volume': int(option.get('volume', 0)),
+                'open_interest': int(option.get('openInterest', 0)),
+                'implied_volatility': iv,
+                'days_to_expiration': days_to_exp,
+                'spread_pct': spread_pct,
+                'current_stock_price': current_price,
+                # Estimated Greeks
+                'delta': self._estimate_delta(current_price, strike, days_to_exp, iv),
+                'theta': self._estimate_theta(current_price, strike, days_to_exp, iv, ask if ask > 0 else 0.01),
+                'gamma': self._estimate_gamma(current_price, strike, days_to_exp, iv),
+                'vega': self._estimate_vega(current_price, strike, days_to_exp, iv)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting option quote for {symbol} {strike} {expiration}: {e}")
+            return None

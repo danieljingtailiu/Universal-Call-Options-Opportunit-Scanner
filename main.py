@@ -27,75 +27,156 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Add performance monitoring
+import time
+from contextlib import contextmanager
+
+@contextmanager
+def timer(operation_name: str):
+    """Context manager for timing operations"""
+    start_time = time.time()
+    try:
+        yield
+    finally:
+        elapsed = time.time() - start_time
+        logger.info(f"{operation_name} completed in {elapsed:.2f} seconds")
+
+
+class PerformanceMonitor:
+    """Simple performance monitoring"""
+    
+    def __init__(self):
+        self.operations = {}
+        
+    def start_operation(self, name: str):
+        """Start timing an operation"""
+        self.operations[name] = time.time()
+        
+    def end_operation(self, name: str) -> float:
+        """End timing an operation and return elapsed time"""
+        if name in self.operations:
+            elapsed = time.time() - self.operations[name]
+            logger.info(f"{name} took {elapsed:.2f} seconds")
+            del self.operations[name]
+            return elapsed
+        return 0.0
+
 
 class ImprovedOptionsTracker:
     """Improved tracker focused on finding and monitoring specific options"""
     
     def __init__(self, config_path: str = 'config.json'):
         """Initialize the tracker with configuration"""
-        self.config = Config(config_path)
-        
-        # Use improved modules
-        self.data_fetcher = DataFetcher(self.config)
-        self.scanner = MarketScanner(self.config, self.data_fetcher)
-        self.options_analyzer = OptionsAnalyzer(self.config, self.data_fetcher)
-        
+        try:
+            self.config = Config(config_path)
+            
+            # Validate configuration
+            issues = self.config.validate()
+            if issues:
+                logger.warning("Configuration issues found:")
+                for issue in issues:
+                    logger.warning(f"  - {issue}")
+            
+            # Use improved modules
+            self.data_fetcher = DataFetcher(self.config)
+            self.scanner = MarketScanner(self.config, self.data_fetcher)
+            self.options_analyzer = OptionsAnalyzer(self.config, self.data_fetcher)
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize tracker: {e}")
+            raise
+    
     def find_opportunities(self, top_n: int = 10):
-        """Find top options opportunities"""
+        """Find top options opportunities with improved error handling"""
         logger.info("="*80)
         logger.info("SCANNING FOR OPTIONS OPPORTUNITIES")
         logger.info("="*80)
         
-        # Step 1: Get small-cap stocks
-        logger.info("\n1. Finding small-cap stocks...")
-        candidates = self.scanner.find_small_caps()
-        logger.info(f"   Found {len(candidates)} small-cap candidates")
+        # Show market cap range being used
+        min_cap_b = self.config.trading.market_cap_min / 1e9
+        max_cap_b = self.config.trading.market_cap_max / 1e9
+        logger.info(f"Market Cap Range: ${min_cap_b:.1f}B - ${max_cap_b:.0f}B")
+        logger.info(f"Min Volume: {self.config.trading.min_volume:,}")
         
-        # Step 2: Apply technical filters (RELAXED)
-        logger.info("\n2. Applying technical analysis...")
-        filtered = self.scanner.apply_filters(candidates)
-        logger.info(f"   {len(filtered)} stocks passed technical filters")
-        
-        # If too few, relax filters further
-        if len(filtered) < 5:
-            logger.info("   Too few results - relaxing filters...")
-            # Get top movers even if they don't pass all filters
-            filtered = self._get_top_movers(candidates, 20)
-        
-        # Step 3: Analyze options for each
-        logger.info(f"\n3. Analyzing options for {len(filtered)} stocks...")
-        all_recommendations = []
-        
-        for i, stock in enumerate(filtered[:top_n], 1):
-            logger.info(f"\n   [{i}/{min(len(filtered), top_n)}] Analyzing {stock['symbol']}...")
+        try:
+            # Step 1: Get stocks within market cap range
+            logger.info("\n1. Finding stocks within market cap range...")
+            candidates = self.scanner.find_small_caps()
+            logger.info(f"   Found {len(candidates)} stocks in range")
             
-            try:
-                # Get multiple recommendations per stock
-                recommendations = self.options_analyzer.analyze_stock(stock)
+            if not candidates:
+                logger.warning("No candidates found. Check market hours and data availability.")
+                return []
+            
+            # Step 2: Apply technical filters
+            logger.info("\n2. Applying technical analysis...")
+            filtered = self.scanner.apply_filters(candidates)
+            logger.info(f"   {len(filtered)} stocks passed technical filters")
+            
+            # If too few, relax filters further
+            if len(filtered) < 5:
+                logger.info("   Too few results - relaxing filters...")
+                # Get top movers even if they don't pass all filters
+                filtered = self._get_top_movers(candidates, 30)
+            
+            # Step 3: Analyze options for each
+            logger.info(f"\n3. Analyzing options for {len(filtered)} stocks...")
+            all_recommendations = []
+            
+            # Analyze more stocks to get better diversification
+            stocks_to_analyze = min(len(filtered), 25)  # Analyze up to 25 stocks
+            
+            for i, stock in enumerate(filtered[:stocks_to_analyze], 1):
+                logger.info(f"\n   [{i}/{stocks_to_analyze}] Analyzing {stock['symbol']}...")
                 
-                if recommendations:
-                    all_recommendations.extend(recommendations)
-                    logger.info(f"   + Found {len(recommendations)} option opportunities")
-                else:
-                    logger.info(f"   - No suitable options found")
+                try:
+                    # Get multiple recommendations per stock
+                    recommendations = self.options_analyzer.analyze_stock(stock)
                     
-            except Exception as e:
-                logger.error(f"   ✗ Error analyzing {stock['symbol']}: {e}")
-        
-        # Step 4: Sort all recommendations by score
-        all_recommendations.sort(key=lambda x: x['score'], reverse=True)
-        
-        # Step 5: Display top recommendations
-        if all_recommendations:
-            self._display_top_recommendations(all_recommendations[:5])
-            self._prompt_for_monitoring(all_recommendations[:5])
-        else:
-            logger.warning("\nNo option opportunities found. Try:")
-            logger.warning("1. Clear cache: python main.py --clear-cache")
-            logger.warning("2. Relax filters in config.json")
-            logger.warning("3. Check market hours")
-        
-        return all_recommendations
+                    if recommendations:
+                        all_recommendations.extend(recommendations)
+                        logger.info(f"   + Found {len(recommendations)} option opportunities")
+                    else:
+                        logger.info(f"   - No suitable options found")
+                        
+                except Exception as e:
+                    logger.error(f"   ✗ Error analyzing {stock['symbol']}: {e}")
+                    # Continue with next stock instead of failing completely
+                    continue
+            
+            # Step 4: Sort and diversify recommendations
+            if all_recommendations:
+                # Sort by score first
+                all_recommendations.sort(key=lambda x: x['score'], reverse=True)
+                
+                # Take only the best option from each stock to ensure diversification
+                diversified_recommendations = []
+                seen_stocks = set()
+                
+                for rec in all_recommendations:
+                    if rec['symbol'] not in seen_stocks:
+                        diversified_recommendations.append(rec)
+                        seen_stocks.add(rec['symbol'])
+                        
+                        # Stop when we have enough different stocks
+                        if len(diversified_recommendations) >= 5:
+                            break
+                
+                # Step 5: Display top recommendations
+                self._display_top_recommendations(diversified_recommendations)
+                self._prompt_for_monitoring(diversified_recommendations)
+            else:
+                logger.warning("\nNo option opportunities found. Try:")
+                logger.warning("1. Clear cache: python main.py --clear-cache")
+                logger.warning("2. Adjust market cap range in config.json")
+                logger.warning("3. Check market hours")
+                logger.warning("4. Wait for rate limits to reset")
+            
+            return all_recommendations
+            
+        except Exception as e:
+            logger.error(f"Fatal error in find_opportunities: {e}")
+            return []
     
     def _get_top_movers(self, stocks: List[Dict], n: int = 20) -> List[Dict]:
         """Get stocks with best momentum regardless of all filters"""
@@ -126,43 +207,51 @@ class ImprovedOptionsTracker:
         return stocks[:n]
     
     def _display_top_recommendations(self, recommendations: List[Dict]):
-        """Display top recommendations in detail"""
-        print("\n" + "="*80)
-        print("TOP OPTIONS RECOMMENDATIONS")
-        print("="*80)
+        """Display top recommendations in a clean, simple format"""
+        print("\n" + "="*60)
+        print("🚀 TOP 5 CALL OPTIONS RECOMMENDATIONS")
+        print("="*60)
         
-        for i, rec in enumerate(recommendations, 1):
-            print(f"\n#{i}. {rec['symbol']} - Score: {rec['score']:.1f}/100")
-            print("-" * 40)
-            print(f"Stock Price: ${rec['current_stock_price']:.2f}")
-            print(f"CALL: ${rec['strike']} strike, Exp: {rec['expiration']} ({rec['days_to_expiration']} days)")
-            print(f"Entry Price: ${rec['entry_price']:.2f} (Bid: ${rec['bid_price']:.2f}, Ask: ${rec['ask_price']:.2f})")
+        if not recommendations:
+            print("❌ No suitable options found. Try:")
+            print("   • Clear cache: python main.py --clear-cache")
+            print("   • Check market hours")
+            print("   • Wait for rate limits to reset")
+            return
+        
+        for i, rec in enumerate(recommendations[:5], 1):
+            # Calculate key metrics
+            moneyness = rec['current_stock_price'] / rec['strike']
+            breakeven_move = ((rec['strike'] + rec['entry_price']) / rec['current_stock_price'] - 1) * 100
             
-            # Key metrics
-            print(f"\nMetrics:")
-            print(f"  • Probability of Profit: {rec['probability_of_profit']:.1%}")
-            print(f"  • Expected Return: {rec['expected_return']:+.1%}")
-            print(f"  • Delta: {rec['delta']:.3f} | Theta: ${rec['theta']:.3f}")
-            print(f"  • Volume: {rec['volume']} | OI: {rec['open_interest']}")
+            print(f"\n{i}. {rec['symbol']} @ ${rec['current_stock_price']:.2f}")
+            print(f"   ${rec['strike']}C {rec['expiration']} ({rec['days_to_expiration']}d)")
+            print(f"   Entry: ${rec['entry_price']:.2f} | BE: +{breakeven_move:.1f}% | Score: {rec['score']:.0f}")
             
-            # Trading plan
-            print(f"\nTrading Plan:")
-            print(f"  • BUY: {rec['symbol']} ${rec['strike']}C {rec['expiration']}")
-            print(f"  • Entry: ${rec['entry_price']:.2f}")
-            print(f"  • Stop Loss: ${rec['stop_loss']:.2f} (-50%)")
-            print(f"  • Target 1: ${rec['target_1']:.2f} (+50%)")
-            print(f"  • Target 2: ${rec['target_2']:.2f} (+100%)")
+            # Show top reason only
+            if rec['recommendation_reasons']:
+                print(f"   ✓ {rec['recommendation_reasons'][0]}")
             
-            # Reasons
-            print(f"\nWhy Buy:")
-            for reason in rec['recommendation_reasons'][:3]:
-                print(f"  + {reason}")
+            # Risk indicator
+            if rec['expected_return'] > 0.2:
+                print(f"   🚀 High potential")
+            elif rec['expected_return'] > 0:
+                print(f"   📈 Good potential")
+            else:
+                print(f"   ⚠️  Caution")
+        
+        print("\n" + "="*60)
+        print("💡 Quick Tips:")
+        print("• Only buy when bullish on the stock")
+        print("• Use 1-5% position sizing")
+        print("• Set stop losses and profit targets")
+        print("• Monitor theta decay near expiration")
+        print("="*60)
     
     def _prompt_for_monitoring(self, recommendations: List[Dict]):
         """Prompt user to add positions to monitoring"""
-        print("\n" + "="*80)
-        print("Would you like to monitor any of these positions?")
-        print("Enter the number(s) separated by commas (e.g., 1,3,5) or 'n' for none:")
+        print("\n📊 MONITOR POSITIONS?")
+        print("Enter numbers (1-5) separated by commas, or 'n' for none:")
         
         try:
             user_input = input("> ").strip()
@@ -183,7 +272,7 @@ class ImprovedOptionsTracker:
                     
                     # Add to monitoring
                     self.options_analyzer.add_to_monitoring(rec, contracts)
-                    print(f"+ Added to monitoring: {contracts} contracts")
+                    print(f"✅ Added {contracts} contracts to monitoring")
                     
         except Exception as e:
             logger.error(f"Error processing selection: {e}")
