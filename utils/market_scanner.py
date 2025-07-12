@@ -19,7 +19,7 @@ class MarketScanner:
         self.config = config
         self.data_fetcher = data_fetcher
         
-    def find_small_caps(self) -> List[Dict]:
+    def find_stocks_by_market_cap(self) -> List[Dict]:
         """Find all stocks with market cap between configured min and max"""
         logger.info("Scanning for stocks within market cap range...")
         
@@ -105,23 +105,39 @@ class MarketScanner:
         return filtered
     
     def _passes_fundamental_filters(self, stock: Dict) -> bool:
-        """Check if stock passes fundamental criteria with growth focus"""
-        # PE Ratio check - allow higher PEs for growth stocks
+        """Check if stock passes fundamental criteria with adaptive filtering"""
+        market_cap = stock.get('market_cap', 0)
+        
+        # Get adaptive thresholds based on market cap
+        growth_min = self.config.get_adaptive_growth_min(market_cap)
+        pe_max = self.config.get_adaptive_pe_max(market_cap)
+        
+        # PE Ratio check - adaptive based on market cap
         if stock.get('pe_ratio'):
-            if stock['pe_ratio'] > 100 or stock['pe_ratio'] < 0:  # Allow high PEs for growth
+            if stock['pe_ratio'] > pe_max or stock['pe_ratio'] < 0:
                 return False
                 
-        # Growth checks - require strong growth
+        # Growth checks - adaptive based on market cap
         if stock.get('revenue_growth'):
-            if stock['revenue_growth'] < 0.15:  # Require 15%+ revenue growth
+            if stock['revenue_growth'] < growth_min:
                 return False
                 
         if stock.get('earnings_growth'):
-            if stock['earnings_growth'] < 0.10:  # Require 10%+ earnings growth
+            # Earnings growth requirement is 2/3 of revenue growth
+            earnings_min = growth_min * 0.67
+            if stock['earnings_growth'] < earnings_min:
                 return False
                 
-        # Institutional ownership - want some institutional interest
-        if stock.get('institutional_ownership', 0) < 0.05:  # At least 5%
+        # Institutional ownership - adaptive based on market cap
+        category = self.config.get_market_cap_category(market_cap)
+        ownership_min = 0.05  # Default 5%
+        
+        if category == 'micro_cap':
+            ownership_min = 0.02  # Lower requirement for micro-caps
+        elif category == 'mega_cap':
+            ownership_min = 0.10  # Higher requirement for mega-caps
+            
+        if stock.get('institutional_ownership', 0) < ownership_min:
             return False
             
         return True

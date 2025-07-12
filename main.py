@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Small-Cap Options Tracker
-Finds the best call options opportunities across different stocks
+Market Cap Options Tracker
+Finds the best call options opportunities across all market cap ranges
 """
 
 import json
@@ -64,7 +64,7 @@ class PerformanceMonitor:
 
 
 class OptionsTracker:
-    """Main options tracker for finding and monitoring call opportunities"""
+    """Main options tracker for finding and monitoring call opportunities across all market caps"""
     
     def __init__(self, config_path: str = 'config.json'):
         """Initialize the tracker with configuration"""
@@ -96,7 +96,7 @@ class OptionsTracker:
         try:
             # Step 1: Get stocks within market cap range
             logger.info("\n1. Finding stocks within market cap range...")
-            candidates = self.scanner.find_small_caps()
+            candidates = self.scanner.find_stocks_by_market_cap()
             logger.info(f"   Found {len(candidates)} stocks in range")
             
             if not candidates:

@@ -101,7 +101,7 @@ class DataFetcher:
                                  min_volume: int) -> List[Dict]:
         """Get stocks filtered by market cap and volume"""
         
-        cache_file = self.cache_dir / "small_caps_universe.pkl"
+        cache_file = self.cache_dir / "market_cap_universe.pkl"
         cache_age_hours = 24
         
         if cache_file.exists():
@@ -113,7 +113,9 @@ class DataFetcher:
                     filtered = []
                     for s in all_stocks:
                         if min_cap <= s.get('market_cap', 0) <= max_cap:
-                            if s.get('volume', 0) >= min_volume * 0.3:
+                            # Use adaptive volume requirements
+                            adaptive_volume = self.config.get_adaptive_volume_min(s.get('market_cap', 0))
+                            if s.get('volume', 0) >= adaptive_volume * 0.3:
                                 filtered.append(s)
                     logger.info(f"Found {len(filtered)} stocks in cache matching criteria")
                     return filtered
