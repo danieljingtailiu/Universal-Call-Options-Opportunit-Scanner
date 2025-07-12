@@ -43,7 +43,7 @@ class OptionsAnalyzer:
             symbol = stock['symbol']
             current_price = stock['price']
             
-            logger.info(f"\nAnalyzing {symbol} at ${current_price:.2f}")
+            # Silent analysis - no verbose output
             
             # Get options chain
             options_chain = self.data_fetcher.get_options_chain(symbol)

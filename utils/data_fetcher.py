@@ -1,5 +1,5 @@
 """
-Improved Data Fetcher with better filtering and options analysis
+Data Fetcher for stock and options data
 """
 
 import logging
@@ -24,14 +24,14 @@ logger = logging.getLogger(__name__)
 
 
 class RateLimiter:
-    """Simple rate limiter to prevent hitting API limits"""
+    """Rate limiter for API calls"""
     
     def __init__(self, max_requests_per_minute: int = 60):
         self.max_requests = max_requests_per_minute
         self.requests = []
         
     def wait_if_needed(self):
-        """Wait if we're hitting rate limits"""
+        """Wait if rate limit reached"""
         now = time.time()
         
         # Remove requests older than 1 minute
@@ -46,13 +46,13 @@ class RateLimiter:
         self.requests.append(now)
         
     def add_jitter(self):
-        """Add random jitter to avoid synchronized requests"""
+        """Add random jitter to requests"""
         jitter = random.uniform(0.1, 0.5)
         time.sleep(jitter)
 
 
 class DataFetcher:
-    """Enhanced data fetcher with improved filtering"""
+    """Data fetcher for stocks and options"""
     
     def __init__(self, config):
         self.config = config
@@ -61,26 +61,22 @@ class DataFetcher:
         self.cache_dir = Path("data/cache")
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         
-        # Rate limiter - much more conservative for overnight runs
-        self.rate_limiter = RateLimiter(max_requests_per_minute=10)  # Very conservative limit
+        self.rate_limiter = RateLimiter(max_requests_per_minute=10)
         
-        # Session for HTTP requests
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
         
-        # RELAXED FILTERS for better results
-        self.min_option_volume = 1  # Accept even 1 contract volume
-        self.min_option_oi = 10  # Minimum 10 open interest
-        self.max_bid_ask_spread = 0.50  # Max 50% spread for low volume
+        self.min_option_volume = 500
+        self.min_option_oi = 1000
+        self.max_bid_ask_spread = 0.25
         
-        # Retry settings
         self.max_retries = 3
         self.retry_delay = 2
         
     def _safe_yfinance_call(self, func, *args, **kwargs):
-        """Safely call yfinance functions with rate limiting and retries"""
+        """Safely call yfinance functions"""
         for attempt in range(self.max_retries):
             try:
                 self.rate_limiter.wait_if_needed()
@@ -103,11 +99,10 @@ class DataFetcher:
     
     def get_stocks_by_market_cap(self, min_cap: float, max_cap: float, 
                                  min_volume: int) -> List[Dict]:
-        """Get stocks filtered by market cap and volume with RELAXED criteria"""
+        """Get stocks filtered by market cap and volume"""
         
-        # Check cache first
         cache_file = self.cache_dir / "small_caps_universe.pkl"
-        cache_age_hours = 24  # Refresh daily
+        cache_age_hours = 24
         
         if cache_file.exists():
             cache_time = datetime.fromtimestamp(cache_file.stat().st_mtime)
@@ -115,58 +110,53 @@ class DataFetcher:
                 logger.info("Loading stocks from cache")
                 with open(cache_file, 'rb') as f:
                     all_stocks = pickle.load(f)
-                    # Apply filters
                     filtered = []
                     for s in all_stocks:
                         if min_cap <= s.get('market_cap', 0) <= max_cap:
-                            if s.get('volume', 0) >= min_volume * 0.3:  # Allow 30% of min volume
+                            if s.get('volume', 0) >= min_volume * 0.3:
                                 filtered.append(s)
                     logger.info(f"Found {len(filtered)} stocks in cache matching criteria")
                     return filtered
         
         logger.info("Fetching fresh stock universe from online sources...")
         
-        # Get stock universe from multiple sources
         all_tickers = set()
         
-        # Source 1: NASDAQ screener (limit to 1000)
         nasdaq_tickers = self._fetch_nasdaq_screener()
-        all_tickers.update(list(nasdaq_tickers)[:1000])
+        all_tickers.update(nasdaq_tickers)
         
-        # Source 2: Yahoo Finance screener (limit to 500)
         yahoo_tickers = self._fetch_yahoo_screener()
-        all_tickers.update(list(yahoo_tickers)[:500])
+        all_tickers.update(yahoo_tickers)
         
-        # Source 3: Add some known high-volume stocks for better coverage
         known_high_volume = [
             'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'TSLA', 'NVDA', 'AMD',
             'NFLX', 'DIS', 'NKE', 'JPM', 'JNJ', 'PG', 'V', 'HD', 'MA', 'UNH',
             'PYPL', 'ADBE', 'CRM', 'ABT', 'PFE', 'TMO', 'ACN', 'LLY', 'DHR',
             'NEE', 'TXN', 'QCOM', 'HON', 'UNP', 'RTX', 'LOW', 'SPGI', 'ISRG',
             'GILD', 'TGT', 'SBUX', 'INTU', 'ADI', 'AMAT', 'KLAC', 'LRCX',
-            'MU', 'WDC', 'STX', 'AVGO', 'MRVL', 'TXN', 'QCOM', 'ADI'
+            'MU', 'WDC', 'STX', 'AVGO', 'MRVL', 'TXN', 'QCOM', 'ADI',
+            'COST', 'PEP', 'ABBV', 'AVGO', 'WMT', 'CVX', 'KO', 'PFE', 'TMO',
+            'ACN', 'LLY', 'DHR', 'NEE', 'TXN', 'QCOM', 'HON', 'UNP', 'RTX',
+            'LOW', 'SPGI', 'ISRG', 'GILD', 'TGT', 'SBUX', 'INTU', 'ADI',
+            'AMAT', 'KLAC', 'LRCX', 'MU', 'WDC', 'STX', 'AVGO', 'MRVL'
         ]
         all_tickers.update(known_high_volume)
         
         logger.info(f"Total unique tickers to verify: {len(all_tickers)}")
         
-        # Limit to first 1000 tickers to avoid rate limits
-        tickers_to_verify = list(all_tickers)[:1000]
-        logger.info(f"Limiting verification to first {len(tickers_to_verify)} tickers")
+        tickers_to_verify = list(all_tickers)
+        logger.info(f"Verifying all {len(tickers_to_verify)} tickers")
         
-        # Verify with relaxed criteria
         verified_stocks = self._verify_and_enrich_tickers_dynamic(tickers_to_verify, min_cap, max_cap)
         
-        # Cache the results
         with open(cache_file, 'wb') as f:
             pickle.dump(verified_stocks, f)
         
-        # Apply volume filter
         filtered_stocks = []
         for s in verified_stocks:
-            if s.get('volume', 0) >= min_volume * 0.3:  # Allow 30% of min volume
+            if s.get('volume', 0) >= min_volume * 0.3:
                 filtered_stocks.append(s)
-            elif s.get('avg_volume', 0) >= min_volume * 0.5:  # Or 50% of average volume
+            elif s.get('avg_volume', 0) >= min_volume * 0.5:
                 filtered_stocks.append(s)
         
         logger.info(f"Returning {len(filtered_stocks)} stocks after filters")
@@ -181,9 +171,9 @@ class DataFetcher:
         # Remove duplicates and sort
         unique_tickers = sorted(list(set(tickers)))
         
-        # Process in batches - very conservative for overnight runs
-        batch_size = 5    # Very small batches
-        max_workers = 2   # Fewer workers
+        # Process in batches
+        batch_size = 10   # Larger batches for efficiency
+        max_workers = 3   # More workers
         
         for i in range(0, len(unique_tickers), batch_size):
             batch = unique_tickers[i:i + batch_size]
@@ -206,8 +196,8 @@ class DataFetcher:
             processed = min(i + batch_size, len(unique_tickers))
             logger.info(f"Verified {processed}/{len(unique_tickers)} tickers, found {len(verified_stocks)} valid stocks")
             
-            # Rate limiting - much longer delay between batches for overnight runs
-            time.sleep(10)
+            # Rate limiting between batches
+            time.sleep(5)
         
         return verified_stocks
     
@@ -312,7 +302,7 @@ class DataFetcher:
             current_price = self.get_quote(symbol)['price']
             
             # Log available expirations
-            logger.info(f"{symbol} has {len(expirations)} expiration dates")
+            # Silent processing - no verbose output
             
             for exp_date in expirations:
                 # Convert expiration to datetime
@@ -327,7 +317,7 @@ class DataFetcher:
                 opt_chain = ticker.option_chain(exp_date)
                 calls = opt_chain.calls
                 
-                logger.info(f"  Expiration {exp_date} ({days_to_exp} days): {len(calls)} strikes")
+                # Silent processing - no verbose output
                 
                 # Process calls with RELAXED criteria
                 for _, call in calls.iterrows():
@@ -349,24 +339,24 @@ class DataFetcher:
                     else:
                         spread_pct = 1.0
                     
-                    # RELAXED: Accept if ANY of these conditions are met
+                    # STRICT: Must meet higher liquidity requirements
                     acceptable = False
                     liquidity_score = 0
                     
-                    # Condition 1: Has some volume
-                    if volume >= 1:
-                        acceptable = True
-                        liquidity_score += 30
-                    
-                    # Condition 2: Has open interest
-                    if open_interest >= 10:
+                    # Condition 1: Must have significant volume
+                    if volume >= self.min_option_volume:
                         acceptable = True
                         liquidity_score += 40
                     
-                    # Condition 3: Reasonable spread (even for low volume)
-                    if spread_pct <= 0.50 and ask > 0:  # 50% spread acceptable for small caps
+                    # Condition 2: Must have significant open interest
+                    if open_interest >= self.min_option_oi:
                         acceptable = True
-                        liquidity_score += 30
+                        liquidity_score += 40
+                    
+                    # Condition 3: Tight spread requirement
+                    if spread_pct <= self.max_bid_ask_spread and ask > 0:
+                        acceptable = True
+                        liquidity_score += 20
                     
                     # Condition 4: Near the money options (more liquid)
                     moneyness = abs(strike - current_price) / current_price
@@ -409,7 +399,7 @@ class DataFetcher:
                     
                     options_data.append(option_data)
                     
-            logger.info(f"Found {len(options_data)} acceptable option contracts for {symbol}")
+            # Silent processing - no verbose output
             return options_data
             
         except Exception as e:
@@ -621,7 +611,7 @@ class DataFetcher:
             url = "https://api.nasdaq.com/api/screener/stocks"
             params = {
                 'tableonly': 'true',
-                'limit': 25000,
+                'limit': 50000,
                 'offset': 0,
                 'download': 'true'
             }
@@ -646,12 +636,13 @@ class DataFetcher:
         tickers = []
         
         try:
-            # Get trending and active stocks
             urls = [
                 "https://query1.finance.yahoo.com/v1/finance/trending/US",
-                "https://query2.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=day_gainers&count=100",
-                "https://query2.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=day_losers&count=100",
-                "https://query2.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=most_actives&count=100"
+                "https://query2.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=day_gainers&count=500",
+                "https://query2.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=day_losers&count=500",
+                "https://query2.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=most_actives&count=500",
+                "https://query2.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=growth_technology_stocks&count=500",
+                "https://query2.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=undervalued_growth_stocks&count=500"
             ]
             
             for url in urls:

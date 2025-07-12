@@ -38,7 +38,7 @@ class MarketScanner:
         
         for i in range(0, len(stocks), batch_size):
             batch = stocks[i:i + batch_size]
-            logger.info(f"Enriching batch {i//batch_size + 1}/{(len(stocks) + batch_size - 1)//batch_size}")
+            # Silent batch processing - no verbose output
             
             for stock in batch:
                 try:

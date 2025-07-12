@@ -1,5 +1,7 @@
-# Ignore the cache/ folder inside data/
+# Project specific ignores
 data/cache/
+reports/
+logs/
 
 
 # Byte-compiled / optimized / DLL files

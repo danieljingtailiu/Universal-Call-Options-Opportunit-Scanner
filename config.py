@@ -1,5 +1,5 @@
 """
-Configuration module for Small-Cap Options Tracker
+Configuration for Small-Cap Options Tracker
 """
 
 import json
@@ -9,55 +9,47 @@ from typing import Dict, List, Optional
 
 @dataclass
 class TradingConfig:
-    """Trading parameters configuration"""
-    market_cap_min: float = 1_000_000_000  # $1B - focus on more established companies
-    market_cap_max: float = 100_000_000_000  # $100B - allow larger companies
+    """Trading parameters"""
+    market_cap_min: float = 1_000_000_000  # $1B minimum
+    market_cap_max: float = 100_000_000_000  # $100B maximum
     
-    # Options parameters
     min_days_to_expiration: int = 7
     max_days_to_expiration: int = 365
     target_days_to_expiration: int = 45
     
-    # Risk parameters
-    max_position_size: float = 0.05  # 5% of portfolio per position
-    max_portfolio_risk: float = 0.20  # 20% total portfolio risk
-    stop_loss_percent: float = 0.30  # 30% stop loss on options
-    take_profit_percent: float = 0.50  # 50% take profit
+    max_position_size: float = 0.05
+    max_portfolio_risk: float = 0.20
+    stop_loss_percent: float = 0.30
+    take_profit_percent: float = 0.50
     
-    # Greeks thresholds
-    min_delta: float = 0.25  # Minimum delta for call options
-    max_theta_decay_daily: float = 0.02  # Max 2% daily theta decay
-    max_iv_percentile: float = 75  # Max IV percentile (avoid overpriced)
+    min_delta: float = 0.25
+    max_theta_decay_daily: float = 0.02
+    max_iv_percentile: float = 75
     
-    # Technical indicators
     rsi_oversold: float = 30
     rsi_overbought: float = 70
-    min_volume: int = 2_000_000  # Higher volume requirement for better liquidity
-    min_option_volume: int = 100  # Minimum option volume
-    min_option_oi: int = 500  # Minimum open interest
+    min_volume: int = 2_000_000
+    min_option_volume: int = 500
+    min_option_oi: int = 1000
     
-    # Exit conditions
-    theta_exit_threshold: float = 0.03  # Exit if theta > 3% daily
-    profit_exit_threshold: float = 0.40  # Exit at 40% profit
-    days_before_exp_exit: int = 7  # Exit 7 days before expiration
-    iv_spike_exit: float = 1.5  # Exit if IV increases 50%
+    theta_exit_threshold: float = 0.03
+    profit_exit_threshold: float = 0.40
+    days_before_exp_exit: int = 7
+    iv_spike_exit: float = 1.5
 
 
 @dataclass
 class ScannerConfig:
-    """Market scanner configuration"""
-    # Technical patterns to look for
+    """Market scanner settings"""
     patterns: List[str] = None
     
-    # Fundamental filters - more stringent for growth
-    min_revenue_growth: float = 0.15  # 15% revenue growth (increased)
-    min_earnings_growth: float = 0.10  # 10% earnings growth (increased)
-    max_pe_ratio: float = 100  # Allow higher PEs for growth stocks
-    min_institutional_ownership: float = 0.05  # 5% institutional ownership
+    min_revenue_growth: float = 0.15
+    min_earnings_growth: float = 0.10
+    max_pe_ratio: float = 100
+    min_institutional_ownership: float = 0.05
     
-    # Momentum indicators - more stringent
-    min_relative_strength: float = 1.1  # Must outperform market by 10%
-    min_price_above_ma: float = 0.05  # 5% above 20-day MA (increased)
+    min_relative_strength: float = 1.1
+    min_price_above_ma: float = 0.05
     
     def __post_init__(self):
         if self.patterns is None:
@@ -72,24 +64,21 @@ class ScannerConfig:
 
 @dataclass
 class DataConfig:
-    """Data source configuration"""
-    # API keys (set these in environment variables)
+    """Data source settings"""
     polygon_api_key: Optional[str] = None
     alpha_vantage_key: Optional[str] = None
     yahoo_finance_enabled: bool = True
     
-    # Data refresh intervals (minutes)
     quote_refresh_interval: int = 5
     options_refresh_interval: int = 15
-    fundamentals_refresh_interval: int = 1440  # Daily
+    fundamentals_refresh_interval: int = 1440
     
-    # Cache settings
     use_cache: bool = True
     cache_expiry_minutes: int = 60
 
 
 class Config:
-    """Main configuration class"""
+    """Main configuration"""
     
     def __init__(self, config_path: Optional[str] = None):
         self.trading = TradingConfig()
@@ -103,7 +92,7 @@ class Config:
         self._load_api_keys()
         
     def load_from_file(self, path: str):
-        """Load configuration from JSON file"""
+        """Load configuration from file"""
         try:
             with open(path, 'r') as f:
                 config_dict = json.load(f)
@@ -132,29 +121,28 @@ class Config:
             print(f"Error parsing config file {path}, using defaults")
             
     def _load_api_keys(self):
-        """Load API keys from environment variables"""
+        """Load API keys from environment"""
         import os
         
         self.data.polygon_api_key = os.getenv('POLYGON_API_KEY')
         self.data.alpha_vantage_key = os.getenv('ALPHA_VANTAGE_KEY')
         
     def save_to_file(self, path: str):
-        """Save current configuration to JSON file"""
+        """Save configuration to file"""
         config_dict = {
             'trading': asdict(self.trading),
             'scanner': asdict(self.scanner),
             'data': {k: v for k, v in asdict(self.data).items() 
-                    if not k.endswith('_key')}  # Don't save API keys
+                    if not k.endswith('_key')}
         }
         
         with open(path, 'w') as f:
             json.dump(config_dict, f, indent=2)
             
     def validate(self) -> List[str]:
-        """Validate configuration and return list of issues"""
+        """Validate configuration"""
         issues = []
         
-        # Validate trading config
         if self.trading.market_cap_min >= self.trading.market_cap_max:
             issues.append("market_cap_min must be less than market_cap_max")
             
@@ -164,11 +152,9 @@ class Config:
         if self.trading.max_position_size > 0.10:
             issues.append("Warning: max_position_size > 10% is risky")
             
-        # Validate data config
         if not self.data.yahoo_finance_enabled and not self.data.polygon_api_key:
             issues.append("No data source configured")
             
-        # Additional validations
         if self.trading.min_volume <= 0:
             issues.append("min_volume must be positive")
             
@@ -178,8 +164,7 @@ class Config:
         if self.trading.take_profit_percent <= 0:
             issues.append("take_profit_percent must be positive")
             
-        # Check for reasonable defaults
-        if self.trading.market_cap_min < 100_000_000:  # $100M
+        if self.trading.market_cap_min < 100_000_000:
             issues.append("Warning: market_cap_min < $100M may include very illiquid stocks")
             
         if self.trading.max_days_to_expiration > 365:
@@ -188,7 +173,7 @@ class Config:
         return issues
     
     def get_safe_config(self) -> Dict:
-        """Get configuration with safe defaults for missing values"""
+        """Get configuration with safe defaults"""
         safe_config = {
             'trading': asdict(self.trading),
             'scanner': asdict(self.scanner),
@@ -196,7 +181,6 @@ class Config:
                     if not k.endswith('_key')}
         }
         
-        # Ensure all required fields exist
         required_fields = {
             'trading': ['market_cap_min', 'market_cap_max', 'min_volume', 'max_position_size'],
             'scanner': ['max_pe_ratio', 'min_revenue_growth', 'min_earnings_growth'],
@@ -211,10 +195,8 @@ class Config:
         return safe_config
 
 
-# Default configuration instance
 default_config = Config()
 
-# Example configuration file content
 EXAMPLE_CONFIG_JSON = {
     "trading": {
         "market_cap_min": 500000000,
@@ -260,7 +242,6 @@ EXAMPLE_CONFIG_JSON = {
 
 
 if __name__ == '__main__':
-    # Create example config file
     import json
     with open('config.json', 'w') as f:
         json.dump(EXAMPLE_CONFIG_JSON, f, indent=2)

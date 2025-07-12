@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Improved Small-Cap Options Tracker with Better Recommendations
+Small-Cap Options Tracker
+Finds the best call options opportunities across different stocks
 """
 
 import json
@@ -62,8 +63,8 @@ class PerformanceMonitor:
         return 0.0
 
 
-class ImprovedOptionsTracker:
-    """Improved tracker focused on finding and monitoring specific options"""
+class OptionsTracker:
+    """Main options tracker for finding and monitoring call opportunities"""
     
     def __init__(self, config_path: str = 'config.json'):
         """Initialize the tracker with configuration"""
@@ -87,16 +88,10 @@ class ImprovedOptionsTracker:
             raise
     
     def find_opportunities(self, top_n: int = 10):
-        """Find top options opportunities with improved error handling"""
+        """Find top call options opportunities"""
         logger.info("="*80)
         logger.info("SCANNING FOR OPTIONS OPPORTUNITIES")
         logger.info("="*80)
-        
-        # Show market cap range being used
-        min_cap_b = self.config.trading.market_cap_min / 1e9
-        max_cap_b = self.config.trading.market_cap_max / 1e9
-        logger.info(f"Market Cap Range: ${min_cap_b:.1f}B - ${max_cap_b:.0f}B")
-        logger.info(f"Min Volume: {self.config.trading.min_volume:,}")
         
         try:
             # Step 1: Get stocks within market cap range
@@ -123,11 +118,10 @@ class ImprovedOptionsTracker:
             logger.info(f"\n3. Analyzing options for {len(filtered)} stocks...")
             all_recommendations = []
             
-            # Analyze more stocks to get better diversification
-            stocks_to_analyze = min(len(filtered), 25)  # Analyze up to 25 stocks
+            # Analyze stocks for diversification
+            stocks_to_analyze = min(len(filtered), 25)
             
             for i, stock in enumerate(filtered[:stocks_to_analyze], 1):
-                logger.info(f"\n   [{i}/{stocks_to_analyze}] Analyzing {stock['symbol']}...")
                 
                 try:
                     # Get multiple recommendations per stock
@@ -135,21 +129,16 @@ class ImprovedOptionsTracker:
                     
                     if recommendations:
                         all_recommendations.extend(recommendations)
-                        logger.info(f"   + Found {len(recommendations)} option opportunities")
-                    else:
-                        logger.info(f"   - No suitable options found")
                         
                 except Exception as e:
-                    logger.error(f"   ✗ Error analyzing {stock['symbol']}: {e}")
-                    # Continue with next stock instead of failing completely
+                    logger.error(f"Error analyzing {stock['symbol']}: {e}")
                     continue
             
-            # Step 4: Sort and diversify recommendations
+            # Sort and diversify recommendations
             if all_recommendations:
-                # Sort by score first
                 all_recommendations.sort(key=lambda x: x['score'], reverse=True)
                 
-                # Take only the best option from each stock to ensure diversification
+                # Get best option per stock for diversification
                 diversified_recommendations = []
                 seen_stocks = set()
                 
@@ -158,11 +147,10 @@ class ImprovedOptionsTracker:
                         diversified_recommendations.append(rec)
                         seen_stocks.add(rec['symbol'])
                         
-                        # Stop when we have enough different stocks
-                        if len(diversified_recommendations) >= 5:
+                        if len(diversified_recommendations) >= 10:
                             break
                 
-                # Step 5: Display top recommendations
+                # Display recommendations
                 self._display_top_recommendations(diversified_recommendations)
                 self._prompt_for_monitoring(diversified_recommendations)
             else:
@@ -179,37 +167,31 @@ class ImprovedOptionsTracker:
             return []
     
     def _get_top_movers(self, stocks: List[Dict], n: int = 20) -> List[Dict]:
-        """Get stocks with best momentum regardless of all filters"""
-        # Calculate simple momentum score
+        """Get stocks with best momentum"""
         for stock in stocks:
             score = 0
             
-            # Volume score
             if stock.get('volume', 0) > stock.get('avg_volume', 0):
                 score += 20
             
-            # Price action (simplified)
-            if stock.get('price', 0) > 5:  # Not penny stock
+            if stock.get('price', 0) > 5:
                 score += 10
             
-            # Has options
             if stock.get('has_options', False):
                 score += 30
             
-            # Market cap in sweet spot
             if 1e9 <= stock.get('market_cap', 0) <= 5e9:
                 score += 20
             
             stock['momentum_score'] = score
         
-        # Sort by score and return top N
         stocks.sort(key=lambda x: x.get('momentum_score', 0), reverse=True)
         return stocks[:n]
     
     def _display_top_recommendations(self, recommendations: List[Dict]):
-        """Display top recommendations in a clean, simple format"""
+        """Display top recommendations"""
         print("\n" + "="*60)
-        print("🚀 TOP 5 CALL OPTIONS RECOMMENDATIONS")
+        print("🚀 TOP 10 CALL OPTIONS RECOMMENDATIONS")
         print("="*60)
         
         if not recommendations:
@@ -219,8 +201,7 @@ class ImprovedOptionsTracker:
             print("   • Wait for rate limits to reset")
             return
         
-        for i, rec in enumerate(recommendations[:5], 1):
-            # Calculate key metrics
+        for i, rec in enumerate(recommendations[:10], 1):
             moneyness = rec['current_stock_price'] / rec['strike']
             breakeven_move = ((rec['strike'] + rec['entry_price']) / rec['current_stock_price'] - 1) * 100
             
@@ -228,11 +209,9 @@ class ImprovedOptionsTracker:
             print(f"   ${rec['strike']}C {rec['expiration']} ({rec['days_to_expiration']}d)")
             print(f"   Entry: ${rec['entry_price']:.2f} | BE: +{breakeven_move:.1f}% | Score: {rec['score']:.0f}")
             
-            # Show top reason only
             if rec['recommendation_reasons']:
                 print(f"   ✓ {rec['recommendation_reasons'][0]}")
             
-            # Risk indicator
             if rec['expected_return'] > 0.2:
                 print(f"   🚀 High potential")
             elif rec['expected_return'] > 0:
@@ -249,9 +228,9 @@ class ImprovedOptionsTracker:
         print("="*60)
     
     def _prompt_for_monitoring(self, recommendations: List[Dict]):
-        """Prompt user to add positions to monitoring"""
+        """Prompt for position monitoring"""
         print("\n📊 MONITOR POSITIONS?")
-        print("Enter numbers (1-5) separated by commas, or 'n' for none:")
+        print("Enter numbers (1-10) separated by commas, or 'n' for none:")
         
         try:
             user_input = input("> ").strip()
@@ -259,18 +238,15 @@ class ImprovedOptionsTracker:
             if user_input.lower() == 'n':
                 return
             
-            # Parse selections
             selections = [int(x.strip()) - 1 for x in user_input.split(',')]
             
             for idx in selections:
-                if 0 <= idx < len(recommendations):
+                if 0 <= idx < min(len(recommendations), 10):
                     rec = recommendations[idx]
                     
-                    # Ask for number of contracts
                     print(f"\nHow many contracts of {rec['symbol']} ${rec['strike']}C?")
                     contracts = int(input("> ") or "1")
                     
-                    # Add to monitoring
                     self.options_analyzer.add_to_monitoring(rec, contracts)
                     print(f"✅ Added {contracts} contracts to monitoring")
                     
@@ -278,15 +254,13 @@ class ImprovedOptionsTracker:
             logger.error(f"Error processing selection: {e}")
     
     def monitor_positions(self):
-        """Monitor existing positions"""
+        """Monitor active positions"""
         logger.info("\n" + "="*80)
         logger.info("MONITORING POSITIONS")
         logger.info("="*80)
         
-        # Get exit signals
         exit_signals = self.options_analyzer.monitor_positions()
         
-        # Display any urgent actions
         if exit_signals:
             print("\n" + "!"*80)
             print("ACTION REQUIRED")
@@ -298,25 +272,23 @@ class ImprovedOptionsTracker:
                 print(f"Recommendation: {signal['recommendation']}")
     
     def run_analysis(self, scan_new: bool = True, monitor: bool = True):
-        """Run complete analysis cycle"""
+        """Run analysis cycle"""
         
-        # Monitor existing positions first
         if monitor:
             self.monitor_positions()
         
-        # Scan for new opportunities
         if scan_new:
             self.find_opportunities()
     
     def clear_cache(self):
-        """Clear all cached data"""
+        """Clear cached data"""
         logger.info("Clearing cache...")
         self.data_fetcher.clear_cache()
         logger.info("Cache cleared successfully")
 
 
 def main():
-    """Main entry point"""
+    """Entry point"""
     parser = argparse.ArgumentParser(description='Improved Small-Cap Options Tracker')
     parser.add_argument('--scan', action='store_true', help='Scan for new opportunities')
     parser.add_argument('--monitor', action='store_true', help='Monitor existing positions')
@@ -325,14 +297,11 @@ def main():
     
     args = parser.parse_args()
     
-    # Create necessary directories
     for dir in ['logs', 'reports', 'data', 'data/cache']:
         Path(dir).mkdir(exist_ok=True)
     
-    # Initialize tracker
-    tracker = ImprovedOptionsTracker(args.config)
+    tracker = OptionsTracker(args.config)
     
-    # Handle commands
     if args.clear_cache:
         tracker.clear_cache()
     elif args.monitor and not args.scan:
@@ -340,7 +309,6 @@ def main():
     elif args.scan and not args.monitor:
         tracker.run_analysis(scan_new=True, monitor=False)
     else:
-        # Default: do both
         tracker.run_analysis(scan_new=True, monitor=True)
 
 
