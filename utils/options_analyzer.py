@@ -1,5 +1,5 @@
 """
-Options Analyzer module for analyzing and recommending options trades
+Improved Options Analyzer with specific recommendations and monitoring
 """
 
 import logging
@@ -8,388 +8,458 @@ from datetime import datetime, timedelta
 import numpy as np
 from scipy.stats import norm
 import math
+import json
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 
 class OptionsAnalyzer:
-    """Analyzes options chains and generates trading signals"""
+    """Enhanced options analyzer with specific recommendations"""
     
     def __init__(self, config, data_fetcher):
         self.config = config
         self.data_fetcher = data_fetcher
+        self.monitored_positions_file = Path("data/monitored_positions.json")
+        self.load_monitored_positions()
         
-    def analyze_stock(self, stock: Dict) -> Optional[Dict]:
-        """Analyze options for a stock and generate buy signal if appropriate"""
+    def load_monitored_positions(self):
+        """Load positions being monitored"""
+        if self.monitored_positions_file.exists():
+            with open(self.monitored_positions_file, 'r') as f:
+                self.monitored_positions = json.load(f)
+        else:
+            self.monitored_positions = {}
+    
+    def save_monitored_positions(self):
+        """Save monitored positions"""
+        self.monitored_positions_file.parent.mkdir(exist_ok=True)
+        with open(self.monitored_positions_file, 'w') as f:
+            json.dump(self.monitored_positions, f, indent=2)
+    
+    def analyze_stock(self, stock: Dict) -> List[Dict]:
+        """Analyze options and return TOP 3 recommendations"""
         try:
             symbol = stock['symbol']
             current_price = stock['price']
             
+            logger.info(f"\nAnalyzing {symbol} at ${current_price:.2f}")
+            
             # Get options chain
             options_chain = self.data_fetcher.get_options_chain(symbol)
             if not options_chain:
-                return None
-                
-            # Find optimal option contract
-            optimal_contract = self._find_optimal_contract(
-                options_chain, 
-                current_price,
-                stock
-            )
+                logger.warning(f"No options found for {symbol}")
+                return []
             
-            if not optimal_contract:
-                return None
-                
-            # Calculate probability of profit
-            prob_profit = self._calculate_probability_of_profit(
-                current_price,
-                optimal_contract['strike'],
-                optimal_contract['days_to_expiration'],
-                optimal_contract['implied_volatility'],
-                optimal_contract['ask']
-            )
+            # Score and rank ALL options
+            scored_options = []
             
-            # Check if meets minimum criteria
-            if prob_profit < 0.60:  # Require 60% probability of profit
-                return None
+            for option in options_chain:
+                score, analysis = self._score_option_comprehensive(option, current_price, stock)
                 
-            # Build recommendation
-            signal = {
-                'symbol': symbol,
-                'recommendation': 'BUY',
-                'contract_type': 'CALL',
-                'strike': optimal_contract['strike'],
-                'expiration': optimal_contract['expiration'],
-                'days_to_expiration': optimal_contract['days_to_expiration'],
-                'ask_price': optimal_contract['ask'],
-                'bid_price': optimal_contract['bid'],
-                'mid_price': (optimal_contract['ask'] + optimal_contract['bid']) / 2,
-                'implied_volatility': optimal_contract['implied_volatility'],
-                'delta': optimal_contract['delta'],
-                'theta': optimal_contract['theta'],
-                'gamma': optimal_contract['gamma'],
-                'vega': optimal_contract['vega'],
-                'volume': optimal_contract['volume'],
-                'open_interest': optimal_contract['open_interest'],
-                'probability_of_profit': prob_profit,
-                'expected_return': self._calculate_expected_return(
-                    current_price, 
-                    optimal_contract,
-                    stock.get('atr', current_price * 0.02)
-                ),
-                'risk_reward_ratio': self._calculate_risk_reward(optimal_contract),
-                'entry_price': optimal_contract['ask'],  # Use ask for conservative entry
-                'stop_loss': optimal_contract['ask'] * (1 - self.config.trading.stop_loss_percent),
-                'take_profit': optimal_contract['ask'] * (1 + self.config.trading.take_profit_percent),
-                'position_score': self._calculate_position_score(
-                    optimal_contract, 
-                    prob_profit, 
-                    stock
-                ),
-                'timestamp': datetime.now().isoformat()
-            }
+                if score > 40:  # Minimum score threshold
+                    recommendation = {
+                        'symbol': symbol,
+                        'current_stock_price': current_price,
+                        'recommendation': 'BUY',
+                        'contract_type': 'CALL',
+                        'strike': option['strike'],
+                        'expiration': option['expiration'],
+                        'days_to_expiration': option['days_to_expiration'],
+                        'ask_price': option['ask'],
+                        'bid_price': option['bid'],
+                        'spread_pct': option['spread_pct'],
+                        'mid_price': option['mid'],
+                        'volume': option['volume'],
+                        'open_interest': option['open_interest'],
+                        'implied_volatility': option['implied_volatility'],
+                        'delta': option['delta'],
+                        'theta': option['theta'],
+                        'gamma': option['gamma'],
+                        'vega': option['vega'],
+                        'score': score,
+                        'analysis': analysis,
+                        'probability_of_profit': self._calculate_probability_of_profit(
+                            current_price, option['strike'], option['days_to_expiration'],
+                            option['implied_volatility'], option['ask']
+                        ),
+                        'expected_return': self._calculate_expected_return(
+                            current_price, option, stock.get('atr', current_price * 0.02)
+                        ),
+                        'risk_reward_ratio': self._calculate_risk_reward(option),
+                        'recommendation_reasons': analysis['reasons'],
+                        'entry_price': option['ask'] if option['ask'] > 0 else option['last'],
+                        'stop_loss': option['ask'] * 0.50,  # 50% stop loss
+                        'target_1': option['ask'] * 1.50,  # 50% profit target
+                        'target_2': option['ask'] * 2.00,  # 100% profit target
+                        'timestamp': datetime.now().isoformat()
+                    }
+                    
+                    scored_options.append(recommendation)
             
-            return signal
+            # Sort by score and return top 3
+            scored_options.sort(key=lambda x: x['score'], reverse=True)
+            top_recommendations = scored_options[:3]
+            
+            # Print detailed recommendations
+            if top_recommendations:
+                self._print_recommendations(symbol, current_price, top_recommendations)
+            
+            return top_recommendations
             
         except Exception as e:
             logger.error(f"Error analyzing options for {stock['symbol']}: {e}")
-            return None
+            return []
     
-    def _find_optimal_contract(self, options_chain: List[Dict], 
-                              current_price: float, 
-                              stock: Dict) -> Optional[Dict]:
-        """Find the optimal call option contract"""
+    def _score_option_comprehensive(self, option: Dict, current_price: float, 
+                                   stock: Dict) -> Tuple[float, Dict]:
+        """Comprehensive scoring system for options"""
+        score = 0
+        reasons = []
+        analysis = {}
         
-        # Filter for calls only
-        calls = [opt for opt in options_chain if opt['type'] == 'CALL']
-        
-        # Apply filters
-        filtered_calls = []
-        for call in calls:
-            # Days to expiration filter
-            if (call['days_to_expiration'] < self.config.trading.min_days_to_expiration or
-                call['days_to_expiration'] > self.config.trading.max_days_to_expiration):
-                continue
-                
-            # Strike price filter (slightly OTM to ATM)
-            if call['strike'] < current_price or call['strike'] > current_price * 1.10:
-                continue
-                
-            # Liquidity filters
-            if (call['volume'] < self.config.trading.min_option_volume or
-                call['open_interest'] < self.config.trading.min_option_oi):
-                continue
-                
-            # Delta filter
-            if call['delta'] < self.config.trading.min_delta:
-                continue
-                
-            # IV percentile filter
-            if call.get('iv_percentile', 0) > self.config.trading.max_iv_percentile:
-                continue
-                
-            filtered_calls.append(call)
-        
-        if not filtered_calls:
-            return None
-            
-        # Score and rank contracts
-        scored_calls = []
-        for call in filtered_calls:
-            score = self._score_contract(call, current_price, stock)
-            call['score'] = score
-            scored_calls.append(call)
-            
-        # Sort by score and return best
-        scored_calls.sort(key=lambda x: x['score'], reverse=True)
-        return scored_calls[0]
-    
-    def _score_contract(self, contract: Dict, current_price: float, stock: Dict) -> float:
-        """Score an option contract based on multiple factors"""
-        score = 0.0
-        
-        # Moneyness score (prefer slightly OTM)
-        moneyness = (contract['strike'] - current_price) / current_price
-        if 0 <= moneyness <= 0.05:
-            score += 30
-        elif 0.05 < moneyness <= 0.10:
+        # 1. Moneyness Score (20 points)
+        moneyness = (option['strike'] - current_price) / current_price
+        if 0 <= moneyness <= 0.05:  # ATM to slightly OTM
             score += 20
-        else:
+            reasons.append(f"Ideal strike near money (${option['strike']})")
+        elif 0.05 < moneyness <= 0.10:
+            score += 15
+            reasons.append(f"Good OTM strike (${option['strike']})")
+        elif -0.05 <= moneyness < 0:  # Slightly ITM
             score += 10
-            
-        # Days to expiration score (prefer target)
-        dte_diff = abs(contract['days_to_expiration'] - self.config.trading.target_days_to_expiration)
-        score += max(0, 20 - dte_diff)
+            reasons.append(f"Slightly ITM (${option['strike']})")
         
-        # Liquidity score
-        liquidity_score = min(20, (contract['volume'] / 100) + (contract['open_interest'] / 500))
-        score += liquidity_score
-        
-        # Greeks score
-        if contract['delta'] >= 0.30:
+        # 2. Time Value Score (15 points)
+        days = option['days_to_expiration']
+        if 30 <= days <= 45:
+            score += 15
+            reasons.append(f"Optimal expiration ({days} days)")
+        elif 25 <= days < 30 or 45 < days <= 60:
             score += 10
-        if contract['theta'] / contract['ask'] < self.config.trading.max_theta_decay_daily:
-            score += 10
-            
-        # IV score (lower is better)
-        iv_score = max(0, 20 - (contract.get('iv_percentile', 50) / 5))
-        score += iv_score
+            reasons.append(f"Good expiration ({days} days)")
+        elif 20 <= days < 25 or 60 < days <= 70:
+            score += 5
         
-        return score
+        # 3. Liquidity Score (25 points)
+        liquidity_score = option.get('liquidity_score', 0)
+        normalized_liquidity = min(liquidity_score / 100 * 25, 25)
+        score += normalized_liquidity
+        
+        if option['volume'] > 100:
+            reasons.append(f"High volume ({option['volume']})")
+        elif option['volume'] > 10:
+            reasons.append(f"Decent volume ({option['volume']})")
+        elif option['open_interest'] > 100:
+            reasons.append(f"Good open interest ({option['open_interest']})")
+        
+        # 4. Greeks Score (20 points)
+        # Delta
+        if 0.25 <= option['delta'] <= 0.45:
+            score += 8
+            reasons.append(f"Good delta ({option['delta']:.2f})")
+        elif 0.20 <= option['delta'] < 0.25 or 0.45 < option['delta'] <= 0.55:
+            score += 5
+        
+        # Theta (want low theta relative to price)
+        theta_ratio = abs(option['theta']) / (option['ask'] if option['ask'] > 0 else 0.01)
+        if theta_ratio < 0.02:  # Less than 2% daily decay
+            score += 7
+            reasons.append(f"Low theta decay ({abs(option['theta']):.3f})")
+        elif theta_ratio < 0.03:
+            score += 4
+        
+        # Gamma (moderate gamma is good)
+        if 0.01 <= option['gamma'] <= 0.05:
+            score += 5
+        
+        # 5. Volatility Score (10 points)
+        iv = option['implied_volatility']
+        if 0.3 <= iv <= 0.6:  # Moderate IV
+            score += 10
+            reasons.append(f"Reasonable IV ({iv:.1%})")
+        elif 0.2 <= iv < 0.3 or 0.6 < iv <= 0.8:
+            score += 5
+        
+        # 6. Spread Score (10 points)
+        spread_pct = option['spread_pct']
+        if spread_pct <= 0.10:  # Tight spread
+            score += 10
+            reasons.append("Tight bid-ask spread")
+        elif spread_pct <= 0.20:
+            score += 7
+            reasons.append("Acceptable spread")
+        elif spread_pct <= 0.35:
+            score += 4
+        elif spread_pct <= 0.50:
+            score += 2
+        
+        # 7. Technical Setup Bonus (up to 10 points)
+        if stock.get('rsi', 50) < 40:
+            score += 5
+            reasons.append("Oversold RSI")
+        
+        if stock.get('relative_strength', 1) > 1.2:
+            score += 5
+            reasons.append("Strong relative strength")
+        
+        # Compile analysis
+        analysis = {
+            'total_score': score,
+            'moneyness': moneyness,
+            'reasons': reasons,
+            'liquidity_assessment': 'Good' if liquidity_score > 50 else 'Fair' if liquidity_score > 30 else 'Low',
+            'risk_assessment': 'Low' if score > 70 else 'Medium' if score > 50 else 'High'
+        }
+        
+        return score, analysis
     
+    def _print_recommendations(self, symbol: str, current_price: float, 
+                              recommendations: List[Dict]):
+        """Print detailed recommendations in a user-friendly format"""
+        print("\n" + "="*80)
+        print(f"OPTIONS RECOMMENDATIONS FOR {symbol}")
+        print(f"Current Stock Price: ${current_price:.2f}")
+        print("="*80)
+        
+        for i, rec in enumerate(recommendations, 1):
+            print(f"\n--- Recommendation #{i} (Score: {rec['score']:.1f}/100) ---")
+            print(f"CALL Option: ${rec['strike']} Strike")
+            print(f"Expiration: {rec['expiration']} ({rec['days_to_expiration']} days)")
+            print(f"Entry Price: ${rec['entry_price']:.2f} (Ask: ${rec['ask_price']:.2f}, Bid: ${rec['bid_price']:.2f})")
+            
+            print(f"\nKey Metrics:")
+            print(f"  • Delta: {rec['delta']:.3f}")
+            print(f"  • Theta: ${rec['theta']:.3f}/day")
+            print(f"  • IV: {rec['implied_volatility']:.1%}")
+            print(f"  • Volume: {rec['volume']} | Open Interest: {rec['open_interest']}")
+            print(f"  • Probability of Profit: {rec['probability_of_profit']:.1%}")
+            print(f"  • Expected Return: {rec['expected_return']:.1%}")
+            
+            print(f"\nTrading Plan:")
+            print(f"  • Entry: ${rec['entry_price']:.2f}")
+            print(f"  • Stop Loss: ${rec['stop_loss']:.2f} (-50%)")
+            print(f"  • Target 1: ${rec['target_1']:.2f} (+50%)")
+            print(f"  • Target 2: ${rec['target_2']:.2f} (+100%)")
+            
+            print(f"\nReasons to Buy:")
+            for reason in rec['recommendation_reasons']:
+                print(f"  + {reason}")
+        
+        print("\n" + "="*80)
+        print("Would you like to monitor any of these positions? (Enter 1, 2, 3, or 'n' for none)")
+        
+    def add_to_monitoring(self, recommendation: Dict, contracts: int = 1):
+        """Add position to monitoring list"""
+        position_id = f"{recommendation['symbol']}_{recommendation['strike']}_{recommendation['expiration']}"
+        
+        self.monitored_positions[position_id] = {
+            'symbol': recommendation['symbol'],
+            'strike': recommendation['strike'],
+            'expiration': recommendation['expiration'],
+            'entry_date': datetime.now().isoformat(),
+            'entry_price': recommendation['entry_price'],
+            'contracts': contracts,
+            'current_stock_price_at_entry': recommendation['current_stock_price'],
+            'entry_analysis': recommendation,
+            'status': 'ACTIVE',
+            'alerts': []
+        }
+        
+        self.save_monitored_positions()
+        logger.info(f"Added {position_id} to monitoring")
+        
+    def monitor_positions(self) -> List[Dict]:
+        """Monitor all active positions and provide exit signals"""
+        exit_signals = []
+        
+        for position_id, position in self.monitored_positions.items():
+            if position['status'] != 'ACTIVE':
+                continue
+                
+            try:
+                signal = self.evaluate_position(position)
+                if signal['action'] != 'HOLD':
+                    exit_signals.append(signal)
+                    
+                # Print monitoring update
+                self._print_position_update(position, signal)
+                
+            except Exception as e:
+                logger.error(f"Error monitoring {position_id}: {e}")
+        
+        return exit_signals
+    
+    def evaluate_position(self, position: Dict) -> Dict:
+        """Evaluate a monitored position for exit signals"""
+        symbol = position['symbol']
+        
+        # Get current data
+        current_contract = self.data_fetcher.get_option_quote(
+            symbol,
+            position['strike'],
+            position['expiration'],
+            'CALL'
+        )
+        
+        if not current_contract:
+            return {'action': 'HOLD', 'reason': 'Unable to get current data'}
+        
+        # Get current stock price
+        stock_quote = self.data_fetcher.get_quote(symbol)
+        current_stock_price = stock_quote['price']
+        
+        # Calculate metrics
+        days_held = (datetime.now() - datetime.fromisoformat(position['entry_date'])).days
+        days_to_expiration = (datetime.fromisoformat(position['expiration']) - datetime.now()).days
+        
+        # Current P&L
+        entry_price = position['entry_price']
+        current_price = current_contract.get('mid', current_contract.get('last', 0))
+        pnl = current_price - entry_price
+        pnl_percent = (pnl / entry_price) * 100 if entry_price > 0 else 0
+        
+        # Compile evaluation
+        evaluation = {
+            'action': 'HOLD',
+            'symbol': symbol,
+            'strike': position['strike'],
+            'expiration': position['expiration'],
+            'current_stock_price': current_stock_price,
+            'current_option_price': current_price,
+            'entry_price': entry_price,
+            'pnl': pnl,
+            'pnl_percent': pnl_percent,
+            'days_held': days_held,
+            'days_to_expiration': days_to_expiration,
+            'current_delta': current_contract.get('delta', 0),
+            'current_theta': current_contract.get('theta', 0),
+            'current_iv': current_contract.get('implied_volatility', 0)
+        }
+        
+        # Exit conditions
+        reasons = []
+        
+        # 1. Profit targets
+        if pnl_percent >= 50:
+            evaluation['action'] = 'SELL'
+            evaluation['urgency'] = 'RECOMMENDED'
+            reasons.append(f"Hit 50% profit target (currently +{pnl_percent:.1f}%)")
+        elif pnl_percent >= 30 and days_to_expiration <= 14:
+            evaluation['action'] = 'SELL'
+            evaluation['urgency'] = 'RECOMMENDED'
+            reasons.append(f"Good profit (+{pnl_percent:.1f}%) with {days_to_expiration} days left")
+        
+        # 2. Stop loss
+        if pnl_percent <= -50:
+            evaluation['action'] = 'SELL'
+            evaluation['urgency'] = 'URGENT'
+            reasons.append(f"Stop loss triggered ({pnl_percent:.1f}%)")
+        
+        # 3. Time-based exits
+        if days_to_expiration <= 7:
+            if evaluation['action'] != 'SELL':
+                evaluation['action'] = 'SELL'
+                evaluation['urgency'] = 'URGENT'
+            reasons.append(f"Only {days_to_expiration} days to expiration")
+        elif days_to_expiration <= 14 and current_contract.get('delta', 0) < 0.20:
+            if evaluation['action'] != 'SELL':
+                evaluation['action'] = 'SELL'
+                evaluation['urgency'] = 'RECOMMENDED'
+            reasons.append(f"Low delta ({current_contract.get('delta', 0):.2f}) with {days_to_expiration} days left")
+        
+        # 4. Theta decay
+        theta_ratio = abs(current_contract.get('theta', 0)) / current_price if current_price > 0 else 0
+        if theta_ratio > 0.05:  # Losing more than 5% per day
+            if evaluation['action'] != 'SELL':
+                evaluation['action'] = 'SELL'
+                evaluation['urgency'] = 'CONSIDER'
+            reasons.append(f"High theta decay ({theta_ratio:.1%} daily)")
+        
+        # 5. Stock moved against us
+        stock_change = (current_stock_price - position['current_stock_price_at_entry']) / position['current_stock_price_at_entry']
+        if stock_change < -0.10:  # Stock down 10%
+            if evaluation['action'] != 'SELL':
+                evaluation['action'] = 'SELL'
+                evaluation['urgency'] = 'RECOMMENDED'
+            reasons.append(f"Stock down {stock_change:.1%} since entry")
+        
+        evaluation['reasons'] = reasons
+        evaluation['recommendation'] = self._get_action_recommendation(evaluation)
+        
+        return evaluation
+    
+    def _get_action_recommendation(self, evaluation: Dict) -> str:
+        """Get detailed recommendation based on evaluation"""
+        if evaluation['action'] == 'HOLD':
+            if evaluation['pnl_percent'] > 20:
+                return "HOLD - Consider taking partial profits or moving stop loss up"
+            elif evaluation['days_to_expiration'] < 21:
+                return "HOLD - Monitor closely as expiration approaches"
+            else:
+                return "HOLD - Position performing as expected"
+        
+        elif evaluation['action'] == 'SELL':
+            if evaluation.get('urgency') == 'URGENT':
+                return "SELL IMMEDIATELY - " + "; ".join(evaluation['reasons'])
+            elif evaluation.get('urgency') == 'RECOMMENDED':
+                return "SELL RECOMMENDED - " + "; ".join(evaluation['reasons'])
+            else:
+                return "CONSIDER SELLING - " + "; ".join(evaluation['reasons'])
+        
+        return "HOLD"
+    
+    def _print_position_update(self, position: Dict, evaluation: Dict):
+        """Print position monitoring update"""
+        print(f"\n--- {position['symbol']} ${position['strike']} {position['expiration']} ---")
+        print(f"Entry: ${position['entry_price']:.2f} | Current: ${evaluation['current_option_price']:.2f}")
+        print(f"P&L: ${evaluation['pnl']:.2f} ({evaluation['pnl_percent']:+.1f}%)")
+        print(f"Stock: ${evaluation['current_stock_price']:.2f} | Days to Exp: {evaluation['days_to_expiration']}")
+        print(f"Action: {evaluation['recommendation']}")
+        
     def _calculate_probability_of_profit(self, spot: float, strike: float, 
                                        days: int, iv: float, premium: float) -> float:
         """Calculate probability of profit for a call option"""
         # Break-even price
         breakeven = strike + premium
         
-        # Convert IV to daily
-        daily_vol = iv / math.sqrt(252)
+        # Use log-normal distribution
+        time_to_exp = days / 365.0
         
-        # Calculate probability using log-normal distribution
-        expected_return = 0  # Assume neutral
-        variance = (daily_vol ** 2) * days
+        # Expected return (neutral assumption)
+        drift = 0.0
         
-        d1 = (math.log(spot / breakeven) + expected_return + 0.5 * variance) / math.sqrt(variance)
-        
-        # Probability that price > breakeven
-        prob = norm.cdf(d1)
-        
-        return prob
+        # Calculate probability
+        try:
+            variance = (iv ** 2) * time_to_exp
+            d1 = (np.log(spot / breakeven) + drift + 0.5 * variance) / np.sqrt(variance)
+            prob = norm.cdf(d1)
+            return prob
+        except:
+            return 0.5  # Default 50%
     
     def _calculate_expected_return(self, spot: float, contract: Dict, atr: float) -> float:
         """Calculate expected return based on price targets"""
         strike = contract['strike']
-        premium = contract['ask']
+        premium = contract['ask'] if contract['ask'] > 0 else contract['mid']
+        days = contract['days_to_expiration']
         
-        # Simple expected move based on ATR
-        expected_move = atr * math.sqrt(contract['days_to_expiration'] / 20)  # Scale ATR by time
-        expected_price = spot + expected_move * 0.7  # Conservative estimate
+        # Expected move based on ATR and time
+        expected_move = atr * np.sqrt(days / 20)  # Scale ATR by time
+        expected_price = spot + expected_move * 0.6  # Conservative 60% of expected move
         
         if expected_price > strike:
             profit = expected_price - strike - premium
-            return profit / premium
+            return profit / premium if premium > 0 else 0
         else:
             return -1.0  # Total loss
     
     def _calculate_risk_reward(self, contract: Dict) -> float:
         """Calculate risk/reward ratio"""
-        max_loss = contract['ask']
+        premium = contract['ask'] if contract['ask'] > 0 else contract['mid']
         
-        # Potential profit at 50% move
-        potential_profit = contract['ask'] * self.config.trading.take_profit_percent
+        # Potential profit at 50% option price increase
+        potential_profit = premium * 0.50
+        max_loss = premium
         
-        return potential_profit / max_loss
-    
-    def _calculate_position_score(self, contract: Dict, prob_profit: float, stock: Dict) -> float:
-        """Calculate overall position score for ranking"""
-        score = 0.0
-        
-        # Probability weight (40%)
-        score += prob_profit * 40
-        
-        # Technical setup weight (30%)
-        if stock.get('pattern') in ['breakout', 'flag']:
-            score += 20
-        elif stock.get('pattern') == 'ascending_triangle':
-            score += 15
-        else:
-            score += 10
-            
-        # Momentum weight (20%)
-        if stock.get('relative_strength', 1.0) > 1.5:
-            score += 20
-        elif stock.get('relative_strength', 1.0) > 1.2:
-            score += 15
-        else:
-            score += 10
-            
-        # Greeks weight (10%)
-        if contract['delta'] > 0.35 and contract['theta'] / contract['ask'] < 0.015:
-            score += 10
-        else:
-            score += 5
-            
-        return score
-    
-    def evaluate_position(self, position: Dict) -> Dict:
-        """Evaluate an existing position for exit signals"""
-        try:
-            symbol = position['symbol']
-            
-            # Get current option data
-            current_contract = self.data_fetcher.get_option_quote(
-                symbol,
-                position['strike'],
-                position['expiration'],
-                'CALL'
-            )
-            
-            if not current_contract:
-                return {'action': 'HOLD', 'reason': 'Unable to get current data'}
-                
-            # Get current stock price
-            stock_quote = self.data_fetcher.get_quote(symbol)
-            current_stock_price = stock_quote['price']
-            
-            # Calculate current metrics
-            days_held = (datetime.now() - datetime.fromisoformat(position['entry_date'])).days
-            days_to_expiration = (datetime.fromisoformat(position['expiration']) - datetime.now()).days
-            
-            # Current P&L
-            entry_price = position['entry_price']
-            current_price = (current_contract['bid'] + current_contract['ask']) / 2
-            pnl_percent = (current_price - entry_price) / entry_price
-            
-            # Update position data
-            position['current_price'] = current_price
-            position['unrealized_pnl'] = current_price - entry_price
-            position['pnl_percent'] = pnl_percent * 100
-            position['theta'] = current_contract['theta']
-            position['iv'] = current_contract['implied_volatility']
-            
-            # Check exit conditions
-            exit_signal = self._check_exit_conditions(
-                position,
-                current_contract,
-                current_stock_price,
-                days_to_expiration,
-                pnl_percent
-            )
-            
-            return exit_signal
-            
-        except Exception as e:
-            logger.error(f"Error evaluating position {position['symbol']}: {e}")
-            return {'action': 'HOLD', 'reason': 'Error in evaluation'}
-    
-    def _check_exit_conditions(self, position: Dict, current_contract: Dict,
-                             stock_price: float, days_to_exp: int, pnl_percent: float) -> Dict:
-        """Check if position meets exit criteria"""
-        
-        # Take profit hit
-        if pnl_percent >= self.config.trading.profit_exit_threshold:
-            return {
-                'action': 'SELL',
-                'reason': f'Take profit target reached ({pnl_percent:.1%})',
-                'symbol': position['symbol'],
-                'current_price': current_contract['mid']
-            }
-            
-        # Stop loss hit
-        if pnl_percent <= -self.config.trading.stop_loss_percent:
-            return {
-                'action': 'SELL',
-                'reason': f'Stop loss triggered ({pnl_percent:.1%})',
-                'symbol': position['symbol'],
-                'current_price': current_contract['mid']
-            }
-            
-        # Time decay exit
-        if days_to_exp <= self.config.trading.days_before_exp_exit:
-            return {
-                'action': 'SELL',
-                'reason': f'Approaching expiration ({days_to_exp} days left)',
-                'symbol': position['symbol'],
-                'current_price': current_contract['mid']
-            }
-            
-        # Theta decay too high
-        theta_decay_rate = abs(current_contract['theta']) / current_contract['mid']
-        if theta_decay_rate > self.config.trading.theta_exit_threshold:
-            return {
-                'action': 'SELL',
-                'reason': f'Theta decay too high ({theta_decay_rate:.1%} daily)',
-                'symbol': position['symbol'],
-                'current_price': current_contract['mid']
-            }
-            
-        # IV spike exit (potential to sell high IV)
-        if 'entry_iv' in position:
-            iv_change = current_contract['implied_volatility'] / position['entry_iv']
-            if iv_change >= self.config.trading.iv_spike_exit:
-                return {
-                    'action': 'SELL',
-                    'reason': f'IV spike ({iv_change:.1f}x increase)',
-                    'symbol': position['symbol'],
-                    'current_price': current_contract['mid']
-                }
-                
-        # Check for roll opportunity
-        if days_to_exp <= 15 and pnl_percent > 0.20:
-            # Profitable position approaching expiration - consider rolling
-            return {
-                'action': 'ROLL',
-                'reason': 'Profitable position to roll forward',
-                'symbol': position['symbol'],
-                'current_price': current_contract['mid'],
-                'new_expiration': self._suggest_roll_expiration(),
-                'new_strike': self._suggest_roll_strike(stock_price, position['strike'])
-            }
-            
-        # Default: Hold position
-        return {
-            'action': 'HOLD',
-            'reason': 'Position within normal parameters',
-            'days_to_exp': days_to_exp,
-            'pnl_percent': pnl_percent,
-            'theta_decay': theta_decay_rate
-        }
-    
-    def _suggest_roll_expiration(self) -> str:
-        """Suggest expiration date for rolling position"""
-        target_date = datetime.now() + timedelta(days=self.config.trading.target_days_to_expiration)
-        # Round to Friday (options expiration)
-        days_to_friday = (4 - target_date.weekday()) % 7
-        target_date += timedelta(days=days_to_friday)
-        return target_date.strftime('%Y-%m-%d')
-    
-    def _suggest_roll_strike(self, current_price: float, old_strike: float) -> float:
-        """Suggest strike price for rolling position"""
-        # If stock has moved up significantly, adjust strike up
-        if current_price > old_strike * 1.05:
-            # Round to nearest $5 increment
-            new_strike = round(current_price * 1.03 / 5) * 5
-            return new_strike
-        else:
-            return old_strike
+        return potential_profit / max_loss if max_loss > 0 else 0

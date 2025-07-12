@@ -11,7 +11,7 @@ from typing import Dict, List, Optional
 class TradingConfig:
     """Trading parameters configuration"""
     market_cap_min: float = 500_000_000  # $500M
-    market_cap_max: float = 10_000_000_000  # $10B
+    market_cap_max: float = 20_000_000_000  # $10B
     
     # Options parameters
     min_days_to_expiration: int = 7
