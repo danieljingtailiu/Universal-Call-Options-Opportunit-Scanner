@@ -320,7 +320,7 @@ class Config:
         for section, fields in required_fields.items():
             for field in fields:
                 if field not in safe_config[section]:
-                    logger.warning(f"Missing required field: {section}.{field}")
+                    print(f"Missing required field: {section}.{field}")
         
         return safe_config
 
