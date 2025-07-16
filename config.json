@@ -59,6 +59,6 @@
     "fundamentals_refresh_interval": 1440,
     "use_cache": true,
     "cache_expiry_minutes": 60,
-    "finnhub_api_token": "d1q1kapr01qrh89njofgd1q1kapr01qrh89njog0"
+    "finnhub_api_token": "YOUR_API_KEY_HERE"
   }
 }
