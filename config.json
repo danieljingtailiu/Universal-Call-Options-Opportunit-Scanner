@@ -14,7 +14,7 @@
     "max_iv_percentile": 75,
     "rsi_oversold": 30,
     "rsi_overbought": 70,
-    "min_volume": 2000000,
+    "min_volume": 1000000,
     "min_option_volume": 500,
     "min_option_oi": 1000,
     "theta_exit_threshold": 0.03,
@@ -58,6 +58,7 @@
     "options_refresh_interval": 15,
     "fundamentals_refresh_interval": 1440,
     "use_cache": true,
-    "cache_expiry_minutes": 60
+    "cache_expiry_minutes": 60,
+    "finnhub_api_token": "d1q1kapr01qrh89njofgd1q1kapr01qrh89njog0"
   }
 }

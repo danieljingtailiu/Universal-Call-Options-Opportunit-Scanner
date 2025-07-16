@@ -543,3 +543,13 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **numpy**: Numerical computations
 - **scipy**: Statistical functions and Greeks calculations
 
+## ⚠️ First Run Will Be Slow
+
+**Important:** The first time you run the tracker, it will take a long time (sometimes 30+ minutes) to fetch and enrich thousands of US stock tickers with real-time price and market cap data. This is necessary to build a high-quality universe for options analysis. All data is cached, so subsequent runs will be much faster (usually just a few minutes).
+
+- If you clear the cache or change the market cap range, the enrichment process will run again.
+- You can monitor progress in the logs (see `logs/tracker.log`).
+- Be patient! This only happens on the first run or after a cache clear.
+
+---
+

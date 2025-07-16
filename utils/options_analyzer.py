@@ -37,78 +37,32 @@ class OptionsAnalyzer:
         with open(self.monitored_positions_file, 'w') as f:
             json.dump(self.monitored_positions, f, indent=2)
     
-    def analyze_stock(self, stock: Dict) -> List[Dict]:
-        """Analyze options and return TOP 3 recommendations"""
+    def analyze_stock(self, stock: dict) -> list:
+        """Analyze a single stock for call options opportunities (scoring and enrichment logic restored)"""
+        symbol = stock['symbol']
+        recommendations = []
         try:
-            symbol = stock['symbol']
-            current_price = stock['price']
-            
-            # Silent analysis - no verbose output
-            
-            # Get options chain
             options_chain = self.data_fetcher.get_options_chain(symbol)
             if not options_chain:
-                logger.warning(f"No options found for {symbol}")
                 return []
-            
-            # Score and rank ALL options
-            scored_options = []
-            
+            current_price = stock.get('price', 0)
             for option in options_chain:
-                score, analysis = self._score_option_comprehensive(option, current_price, stock)
-                
-                if score > 40:  # Minimum score threshold
-                    recommendation = {
-                        'symbol': symbol,
-                        'current_stock_price': current_price,
-                        'recommendation': 'BUY',
-                        'contract_type': 'CALL',
-                        'strike': option['strike'],
-                        'expiration': option['expiration'],
-                        'days_to_expiration': option['days_to_expiration'],
-                        'ask_price': option['ask'],
-                        'bid_price': option['bid'],
-                        'spread_pct': option['spread_pct'],
-                        'mid_price': option['mid'],
-                        'volume': option['volume'],
-                        'open_interest': option['open_interest'],
-                        'implied_volatility': option['implied_volatility'],
-                        'delta': option['delta'],
-                        'theta': option['theta'],
-                        'gamma': option['gamma'],
-                        'vega': option['vega'],
-                        'score': score,
-                        'analysis': analysis,
-                        'probability_of_profit': self._calculate_probability_of_profit(
-                            current_price, option['strike'], option['days_to_expiration'],
-                            option['implied_volatility'], option['ask']
-                        ),
-                        'expected_return': self._calculate_expected_return(
-                            current_price, option, stock.get('atr', current_price * 0.02)
-                        ),
-                        'risk_reward_ratio': self._calculate_risk_reward(option),
-                        'recommendation_reasons': analysis['reasons'],
-                        'entry_price': option['ask'] if option['ask'] > 0 else option['last'],
-                        'stop_loss': option['ask'] * 0.50,  # 50% stop loss
-                        'target_1': option['ask'] * 1.50,  # 50% profit target
-                        'target_2': option['ask'] * 2.00,  # 100% profit target
-                        'timestamp': datetime.now().isoformat()
-                    }
-                    
-                    scored_options.append(recommendation)
-            
-            # Sort by score and return only the best option per stock
-            scored_options.sort(key=lambda x: x['score'], reverse=True)
-            best_recommendation = scored_options[0] if scored_options else None
-            
-            # Print detailed recommendations (disabled to avoid duplication)
-            if best_recommendation:
-                self._print_recommendations(symbol, current_price, [best_recommendation])
-            
-            return [best_recommendation] if best_recommendation else []
-            
+                try:
+                    score, analysis = self._score_option_comprehensive(option, current_price, stock)
+                    recommendation = option.copy()
+                    recommendation['score'] = score
+                    recommendation['analysis'] = analysis
+                    recommendation['recommendation_reasons'] = analysis.get('reasons', [])
+                    recommendation['expected_return'] = analysis.get('expected_return', 0)
+                    recommendation['current_stock_price'] = current_price
+                    recommendation['entry_price'] = option.get('ask', option.get('mid', 0))
+                    recommendations.append(recommendation)
+                except Exception as e:
+                    logger.warning(f"Error analyzing option for {symbol}: {e}")
+                    continue
+            return recommendations
         except Exception as e:
-            logger.error(f"Error analyzing options for {stock['symbol']}: {e}")
+            logger.error(f"Error analyzing options for {symbol}: {e}")
             return []
     
     def _score_option_comprehensive(self, option: Dict, current_price: float, 
@@ -260,14 +214,71 @@ class OptionsAnalyzer:
             score -= 5
             reasons.append(f"Poor expected return ({expected_return:.1%})")
         
-        # 7. Technical Setup Bonus (up to 10 points)
-        if stock.get('rsi', 50) < 40:
-            score += 5
-            reasons.append("Oversold RSI - potential bounce")
+        # 7. Technical Setup Bonus (up to 15 points) - Enhanced for negative momentum analysis
+        technical_bonus = 0
         
-        if stock.get('relative_strength', 1) > 1.2:
-            score += 5
+        # RSI analysis for oversold conditions
+        rsi = stock.get('rsi', 50)
+        if rsi < 30:
+            technical_bonus += 8
+            reasons.append("Extremely oversold RSI - strong bounce potential")
+        elif rsi < 40:
+            technical_bonus += 5
+            reasons.append("Oversold RSI - potential reversal")
+        elif rsi < 50:
+            technical_bonus += 3
+            reasons.append("Below-average RSI - room for improvement")
+        
+        # Relative strength analysis
+        relative_strength = stock.get('relative_strength', 1.0)
+        if relative_strength > 1.3:
+            technical_bonus += 5
             reasons.append("Strong relative strength vs market")
+        elif relative_strength > 1.1:
+            technical_bonus += 3
+            reasons.append("Above-average relative strength")
+        elif relative_strength < 0.8:
+            technical_bonus += 2
+            reasons.append("Underperforming market - mean reversion potential")
+        
+        # Price momentum analysis
+        price_change_20d = stock.get('price_change_20d', 0)
+        price_change_60d = stock.get('price_change_60d', 0)
+        
+        # Negative momentum analysis - look for reversal signals
+        if price_change_20d < -0.15 and price_change_60d < -0.30:
+            # Stock has been beaten down - potential for mean reversion
+            technical_bonus += 6
+            reasons.append("Significant recent decline - oversold conditions")
+        elif price_change_20d < -0.10:
+            technical_bonus += 4
+            reasons.append("Recent decline - potential bounce")
+        elif price_change_20d > 0.05:
+            technical_bonus += 3
+            reasons.append("Positive recent momentum")
+        
+        # Volume analysis for confirmation
+        volume_ratio = stock.get('volume_ratio', 1.0)
+        if volume_ratio > 1.5:
+            technical_bonus += 3
+            reasons.append("High volume - strong institutional interest")
+        elif volume_ratio > 1.2:
+            technical_bonus += 2
+            reasons.append("Above-average volume")
+        
+        # Market cap analysis for small-cap opportunities
+        market_cap = stock.get('market_cap', 0)
+        if 1e9 <= market_cap <= 5e9:  # Small-cap range
+            technical_bonus += 2
+            reasons.append("Small-cap stock - higher volatility potential")
+        
+        # Sector rotation analysis (simplified)
+        sector = stock.get('sector', 'Unknown')
+        if sector in ['Technology', 'Healthcare', 'Consumer Discretionary']:
+            technical_bonus += 2
+            reasons.append(f"{sector} sector - growth potential")
+        
+        score += min(technical_bonus, 15)  # Cap at 15 points
         
         # 8. Risk/Reward Analysis (10 points)
         risk_reward = self._calculate_risk_reward(option)

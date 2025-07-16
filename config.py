@@ -10,8 +10,8 @@ from typing import Dict, List, Optional
 @dataclass
 class TradingConfig:
     """Trading parameters"""
-    market_cap_min: float = 100_000_000  # $100M minimum (micro-cap)
-    market_cap_max: float = 1_000_000_000_000  # $1T maximum (mega-cap)
+    market_cap_min: float = 1_000_000_000  # $1B minimum
+    market_cap_max: float = 100_000_000_000  # $100B maximum
     
     min_days_to_expiration: int = 7
     max_days_to_expiration: int = 365
@@ -87,11 +87,10 @@ class DataConfig:
     polygon_api_key: Optional[str] = None
     alpha_vantage_key: Optional[str] = None
     yahoo_finance_enabled: bool = True
-    
+    finnhub_api_token: Optional[str] = None
     quote_refresh_interval: int = 5
     options_refresh_interval: int = 15
     fundamentals_refresh_interval: int = 1440
-    
     use_cache: bool = True
     cache_expiry_minutes: int = 60
 

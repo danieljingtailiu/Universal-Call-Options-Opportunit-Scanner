@@ -60,21 +60,114 @@ class DataFetcher:
         self.cache_expiry = {}
         self.cache_dir = Path("data/cache")
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        
+        self.fundamentals_cache_file = self.cache_dir / "fundamentals.pkl"
+        self.fundamentals_cache = self._load_fundamentals_cache()
+        self.fundamentals_cache_expiry_hours = 24  # Cache expiry in hours
         self.rate_limiter = RateLimiter(max_requests_per_minute=10)
-        
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
-        
         self.min_option_volume = 500
         self.min_option_oi = 1000
         self.max_bid_ask_spread = 0.25
-        
         self.max_retries = 3
         self.retry_delay = 2
-        
+
+    def _load_fundamentals_cache(self):
+        try:
+            import pickle
+            if self.fundamentals_cache_file.exists():
+                with open(self.fundamentals_cache_file, 'rb') as f:
+                    return pickle.load(f)
+        except Exception:
+            pass
+        return {}
+
+    def _save_fundamentals_cache(self):
+        try:
+            import pickle
+            with open(self.fundamentals_cache_file, 'wb') as f:
+                pickle.dump(self.fundamentals_cache, f)
+        except Exception as e:
+            logger.warning(f"Error saving fundamentals cache: {e}")
+
+    def _load_pickle_cache(self, cache_file):
+        try:
+            if cache_file.exists():
+                with open(cache_file, 'rb') as f:
+                    return pickle.load(f)
+        except Exception:
+            pass
+        return {}
+
+    def _save_pickle_cache(self, cache_file, cache_dict):
+        try:
+            with open(cache_file, 'wb') as f:
+                pickle.dump(cache_dict, f)
+        except Exception as e:
+            logger.warning(f"Error saving cache {cache_file}: {e}")
+
+    def get_fundamentals(self, symbol: str) -> Dict:
+        """Get fundamental data with defaults for missing values, using persistent cache"""
+        try:
+            now = time.time()
+            cache_entry = self.fundamentals_cache.get(symbol)
+            if cache_entry:
+                data, ts = cache_entry
+                if now - ts < self.fundamentals_cache_expiry_hours * 3600:
+                    return data
+            # Not cached or stale, fetch from yfinance
+            ticker = yf.Ticker(symbol)
+            info = ticker.info
+            # Get financial data with error handling
+            try:
+                financials = ticker.quarterly_financials
+                revenue_growth = None
+                if not financials.empty and len(financials.columns) >= 2:
+                    recent_revenue = financials.iloc[0, 0]
+                    previous_revenue = financials.iloc[0, 1]
+                    if previous_revenue and previous_revenue != 0:
+                        revenue_growth = (recent_revenue - previous_revenue) / previous_revenue
+            except:
+                revenue_growth = None
+            data = {
+                'pe_ratio': info.get('forwardPE', info.get('trailingPE', 25)),
+                'peg_ratio': info.get('pegRatio', 1.5),
+                'price_to_book': info.get('priceToBook', 2),
+                'revenue_growth': revenue_growth if revenue_growth else 0.10,
+                'earnings_growth': info.get('earningsQuarterlyGrowth', 0.10),
+                'profit_margin': info.get('profitMargins', 0.10),
+                'institutional_ownership': info.get('heldPercentInstitutions', 0.20),
+                'insider_ownership': info.get('heldPercentInsiders', 0.10),
+                'short_ratio': info.get('shortRatio', 2),
+                'beta': info.get('beta', 1.2)
+            }
+            self.fundamentals_cache[symbol] = (data, now)
+            # Save cache every 100 updates to avoid excessive disk writes
+            if len(self.fundamentals_cache) % 100 == 0:
+                self._save_fundamentals_cache()
+            return data
+        except Exception as e:
+            logger.error(f"Error getting fundamentals for {symbol}: {e}")
+            # Return reasonable defaults
+            data = {
+                'pe_ratio': 25,
+                'peg_ratio': 1.5,
+                'price_to_book': 2,
+                'revenue_growth': 0.10,
+                'earnings_growth': 0.10,
+                'profit_margin': 0.10,
+                'institutional_ownership': 0.20,
+                'insider_ownership': 0.10,
+                'short_ratio': 2,
+                'beta': 1.2
+            }
+            self.fundamentals_cache[symbol] = (data, time.time())
+            return data
+
+    # Save fundamentals cache at the end of enrichment (call this from market_scanner after enrichment)
+    
     def _safe_yfinance_call(self, func, *args, **kwargs):
         """Safely call yfinance functions"""
         for attempt in range(self.max_retries):
@@ -84,7 +177,13 @@ class DataFetcher:
                 self.rate_limiter.add_jitter()
                 return result
             except Exception as e:
-                if "rate limit" in str(e).lower() or "429" in str(e):
+                error_str = str(e).lower()
+                
+                # Suppress "possibly delisted" errors
+                if "possibly delisted" in error_str:
+                    return None
+                    
+                if "rate limit" in error_str or "429" in error_str:
                     wait_time = (attempt + 1) * self.retry_delay * 2
                     logger.warning(f"Rate limit hit, waiting {wait_time} seconds (attempt {attempt + 1})")
                     time.sleep(wait_time)
@@ -97,186 +196,433 @@ class DataFetcher:
         
         return None
     
-    def get_stocks_by_market_cap(self, min_cap: float, max_cap: float, 
-                                 min_volume: int) -> List[Dict]:
-        """Get stocks filtered by market cap and volume"""
-        
+    def get_stocks_by_market_cap(self, min_cap: float, max_cap: float, min_volume: int) -> List[Dict]:
+        """Get stocks filtered by market cap and volume using bulk data sources or CSV"""
+        # Try CSV import first
+        csv_file = Path('tickers.csv')
+        if csv_file.exists():
+            logger.info("Loading tickers from tickers.csv...")
+            import pandas as pd
+            df = pd.read_csv(csv_file)
+            tickers = df['symbol'].dropna().unique().tolist()
+            stocks = []
+            for symbol in tickers:
+                try:
+                    quote = self.get_quote(symbol)
+                    # Try to get market cap from yfinance info if available
+                    try:
+                        ticker_obj = yf.Ticker(symbol)
+                        info = ticker_obj.info
+                        market_cap = info.get('marketCap', quote.get('price', 0) * quote.get('volume', 0))
+                    except Exception:
+                        market_cap = quote.get('price', 0) * quote.get('volume', 0)
+                    stock_data = {
+                        'symbol': symbol,
+                        'name': symbol,
+                        'market_cap': market_cap,
+                        'price': quote.get('price', 0),
+                        'volume': quote.get('volume', 0),
+                        'avg_volume': quote.get('avg_volume', 0),
+                        'sector': 'Unknown',
+                        'industry': 'Unknown',
+                        'exchange': 'Unknown',
+                        'pe_ratio': None,
+                        'has_options': True,
+                        'market_cap_category': self._get_market_cap_category(market_cap)
+                    }
+                    if min_cap <= market_cap <= max_cap and stock_data['volume'] >= min_volume:
+                        stocks.append(stock_data)
+                except Exception as e:
+                    logger.warning(f"Error loading {symbol} from CSV: {e}")
+            logger.info(f"Loaded {len(stocks)} stocks from CSV universe")
+            return stocks
+        # If no CSV, use the normal logic
         cache_file = self.cache_dir / "market_cap_universe.pkl"
         cache_age_hours = 24
-        
+        def filter_stocks(stocks):
+            filtered = []
+            logger.info(f"Applying lenient filters (min_cap: {min_cap}, max_cap: {max_cap})")
+            logger.info(f"Found {len(stocks)} stocks to filter")
+            for s in stocks:
+                # Only filter out stocks with missing/zero symbol, price, or market cap
+                if not s.get('symbol') or s.get('market_cap', 0) <= 0 or s.get('price', 0) <= 0:
+                    continue
+                if min_cap <= s.get('market_cap', 0) <= max_cap:
+                    filtered.append(s)
+            logger.info(f"Found {len(filtered)} stocks after filtering")
+            return filtered
+        # Try cache first
         if cache_file.exists():
             cache_time = datetime.fromtimestamp(cache_file.stat().st_mtime)
             if (datetime.now() - cache_time).total_seconds() < cache_age_hours * 3600:
                 logger.info("Loading stocks from cache")
                 with open(cache_file, 'rb') as f:
                     all_stocks = pickle.load(f)
-                    filtered = []
-                    for s in all_stocks:
-                        if min_cap <= s.get('market_cap', 0) <= max_cap:
-                            # Use adaptive volume requirements
-                            adaptive_volume = self.config.get_adaptive_volume_min(s.get('market_cap', 0))
-                            if s.get('volume', 0) >= adaptive_volume * 0.3:
-                                filtered.append(s)
-                    logger.info(f"Found {len(filtered)} stocks in cache matching criteria")
-                    return filtered
-        
-        logger.info("Fetching fresh stock universe from online sources...")
-        
-        all_tickers = set()
-        
-        nasdaq_tickers = self._fetch_nasdaq_screener()
-        all_tickers.update(nasdaq_tickers)
-        
-        yahoo_tickers = self._fetch_yahoo_screener()
-        all_tickers.update(yahoo_tickers)
-        
-        known_high_volume = [
-            'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'TSLA', 'NVDA', 'AMD',
-            'NFLX', 'DIS', 'NKE', 'JPM', 'JNJ', 'PG', 'V', 'HD', 'MA', 'UNH',
-            'PYPL', 'ADBE', 'CRM', 'ABT', 'PFE', 'TMO', 'ACN', 'LLY', 'DHR',
-            'NEE', 'TXN', 'QCOM', 'HON', 'UNP', 'RTX', 'LOW', 'SPGI', 'ISRG',
-            'GILD', 'TGT', 'SBUX', 'INTU', 'ADI', 'AMAT', 'KLAC', 'LRCX',
-            'MU', 'WDC', 'STX', 'AVGO', 'MRVL', 'TXN', 'QCOM', 'ADI',
-            'COST', 'PEP', 'ABBV', 'AVGO', 'WMT', 'CVX', 'KO', 'PFE', 'TMO',
-            'ACN', 'LLY', 'DHR', 'NEE', 'TXN', 'QCOM', 'HON', 'UNP', 'RTX',
-            'LOW', 'SPGI', 'ISRG', 'GILD', 'TGT', 'SBUX', 'INTU', 'ADI',
-            'AMAT', 'KLAC', 'LRCX', 'MU', 'WDC', 'STX', 'AVGO', 'MRVL'
-        ]
-        all_tickers.update(known_high_volume)
-        
-        logger.info(f"Total unique tickers to verify: {len(all_tickers)}")
-        
-        tickers_to_verify = list(all_tickers)
-        logger.info(f"Verifying all {len(tickers_to_verify)} tickers")
-        
-        verified_stocks = self._verify_and_enrich_tickers_dynamic(tickers_to_verify, min_cap, max_cap)
-        
+                    filtered = filter_stocks(all_stocks)
+                    if filtered:
+                        return filtered
+                    else:
+                        logger.info("Cache empty after filtering, fetching fresh data...")
+        # Fetch fresh data if cache is empty or stale
+        logger.info("Fetching stock universe using bulk data sources...")
+        stocks = self._fetch_bulk_stock_data(min_cap, max_cap)
         with open(cache_file, 'wb') as f:
-            pickle.dump(verified_stocks, f)
-        
-        filtered_stocks = []
-        for s in verified_stocks:
-            if s.get('volume', 0) >= min_volume * 0.3:
-                filtered_stocks.append(s)
-            elif s.get('avg_volume', 0) >= min_volume * 0.5:
-                filtered_stocks.append(s)
-        
+            pickle.dump(stocks, f)
+        filtered_stocks = filter_stocks(stocks)
         logger.info(f"Returning {len(filtered_stocks)} stocks after filters")
         return filtered_stocks
     
-    def _verify_and_enrich_tickers_dynamic(self, tickers: List[str], min_cap: float, max_cap: float) -> List[Dict]:
-        """Verify tickers with dynamic criteria based on market cap range"""
-        verified_stocks = []
-        
-        logger.info(f"Verifying {len(tickers)} tickers with market cap range ${min_cap/1e9:.1f}B - ${max_cap/1e9:.0f}B...")
-        
-        # Remove duplicates and sort
-        unique_tickers = sorted(list(set(tickers)))
-        
-        # Process in batches
-        batch_size = 10   # Larger batches for efficiency
-        max_workers = 3   # More workers
-        
-        for i in range(0, len(unique_tickers), batch_size):
-            batch = unique_tickers[i:i + batch_size]
-            batch_stocks = []
-            
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_ticker = {
-                    executor.submit(self._verify_single_ticker_dynamic, ticker, min_cap, max_cap): ticker 
-                    for ticker in batch
-                }
-                
-                for future in as_completed(future_to_ticker):
-                    result = future.result()
-                    if result:
-                        batch_stocks.append(result)
-            
-            verified_stocks.extend(batch_stocks)
-            
-            # Progress update
-            processed = min(i + batch_size, len(unique_tickers))
-            logger.info(f"Verified {processed}/{len(unique_tickers)} tickers, found {len(verified_stocks)} valid stocks")
-            
-            # Rate limiting between batches
-            time.sleep(5)
-        
-        return verified_stocks
-    
-    def _verify_single_ticker_dynamic(self, ticker: str, min_cap: float, max_cap: float) -> Optional[Dict]:
-        """Verify ticker with dynamic criteria based on market cap"""
+    def _fetch_additional_screeners(self, min_cap: float, max_cap: float) -> List[Dict]:
+        """Fetch from additional Yahoo Finance screeners for more variety, maximizing count."""
+        stocks = []
+        # Additional valid screener IDs for more variety
+        additional_ids = [
+            "undervalued_large_caps",
+            "aggressive_small_caps",
+            "small_cap_gainers",
+            "mid_cap_movers"
+        ]
+        for scrid in additional_ids:
+            for count in [250, 200, 100]:
+                url = f"https://query2.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds={scrid}&count={count}"
+                try:
+                    response = self.session.get(url, timeout=10)
+                    if response.status_code == 200:
+                        data = response.json()
+                        if 'finance' in data:
+                            results = data.get('finance', {}).get('result', [])
+                            if results and 'quotes' in results[0]:
+                                for quote in results[0]['quotes']:
+                                    market_cap = quote.get('marketCap', 0)
+                                    if min_cap <= market_cap <= max_cap:
+                                        stock_data = {
+                                            'symbol': quote.get('symbol', ''),
+                                            'name': quote.get('shortName', quote.get('symbol', '')),
+                                            'market_cap': market_cap,
+                                            'price': quote.get('regularMarketPrice', 0),
+                                            'volume': quote.get('volume', 0),
+                                            'avg_volume': quote.get('averageVolume', 0),
+                                            'sector': quote.get('sector', 'Unknown'),
+                                            'industry': quote.get('industry', 'Unknown'),
+                                            'exchange': quote.get('exchange', 'Unknown'),
+                                            'pe_ratio': quote.get('forwardPE'),
+                                            'has_options': True,  # Assume major stocks have options
+                                            'market_cap_category': self._get_market_cap_category(market_cap)
+                                        }
+                                        stocks.append(stock_data)
+                        break
+                    elif response.status_code == 400:
+                        continue
+                    else:
+                        break
+                except Exception as e:
+                    logger.warning(f"Error with Yahoo screener {scrid} count={count}: {e}")
+                    continue
+        logger.info(f"Additional Yahoo screeners returned {len(stocks)} stocks")
+        return stocks
+
+    def _fetch_yahoo_bulk_screener(self, min_cap: float, max_cap: float) -> List[Dict]:
+        """Fetch stocks using Yahoo Finance bulk screener, maximizing count and using all valid IDs."""
+        stocks = []
+        # List of valid Yahoo screener IDs (no 404s)
+        screener_ids = [
+            "most_actives",
+            "day_gainers",
+            "day_losers",
+            "growth_technology_stocks",
+            "undervalued_growth_stocks"
+        ]
+        for scrid in screener_ids:
+            for count in [250, 200, 100]:  # Try largest first, fallback if needed
+                url = f"https://query2.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds={scrid}&count={count}"
+                try:
+                    response = self.session.get(url, timeout=10)
+                    if response.status_code == 200:
+                        data = response.json()
+                        if 'finance' in data:
+                            results = data.get('finance', {}).get('result', [])
+                            if results and 'quotes' in results[0]:
+                                quotes = results[0]['quotes']
+                                for quote in quotes:
+                                    market_cap = quote.get('marketCap', 0)
+                                    if min_cap <= market_cap <= max_cap:
+                                        stock_data = {
+                                            'symbol': quote.get('symbol', ''),
+                                            'name': quote.get('shortName', quote.get('symbol', '')),
+                                            'market_cap': market_cap,
+                                            'price': quote.get('regularMarketPrice', 0),
+                                            'volume': quote.get('volume', 0),
+                                            'avg_volume': quote.get('averageVolume', 0),
+                                            'sector': quote.get('sector', 'Unknown'),
+                                            'industry': quote.get('industry', 'Unknown'),
+                                            'exchange': quote.get('exchange', 'Unknown'),
+                                            'pe_ratio': quote.get('forwardPE'),
+                                            'has_options': True,  # Assume major stocks have options
+                                            'market_cap_category': self._get_market_cap_category(market_cap)
+                                        }
+                                        stocks.append(stock_data)
+                        break  # Success, don't try lower counts
+                    elif response.status_code == 400:
+                        continue  # Try next lower count
+                    else:
+                        break  # Don't retry for other errors
+                except Exception as e:
+                    logger.warning(f"Error with Yahoo screener {scrid} count={count}: {e}")
+                    continue
+        logger.info(f"Yahoo Finance returned {len(stocks)} stocks")
+        return stocks
+
+    def _fetch_nasdaq_bulk_data(self, min_cap: float, max_cap: float) -> List[Dict]:
+        """Fetch stocks using NASDAQ bulk data"""
+        stocks = []
         try:
-            # Skip if ticker has special characters
-            if any(c in ticker for c in ['^', '.', '=', ' ', '/']):
-                return None
-                
-            stock = yf.Ticker(ticker)
-            
-            # Use safe call for info
-            info = self._safe_yfinance_call(lambda: stock.info)
-            if not info:
-                return None
-            
-            # Check if valid stock with market cap
-            market_cap = info.get('marketCap', 0)
-            if not market_cap or market_cap < min_cap or market_cap > max_cap:
-                return None
-            
-            # Get recent price/volume data with safe call
-            hist = self._safe_yfinance_call(lambda: stock.history(period="5d"))
-            if not hist or hist.empty:
-                return None
-            
-            current_price = hist['Close'].iloc[-1]
-            avg_volume = hist['Volume'].mean()
-            
-            # Dynamic price filter based on market cap
-            if market_cap < 5e9:  # Under $5B
-                min_price = 1.0
-            elif market_cap < 50e9:  # Under $50B
-                min_price = 0.50
-            else:  # Over $50B
-                min_price = 0.25
-            
-            if current_price < min_price:
-                return None
-            
-            # Dynamic volume filter based on market cap
-            if market_cap < 1e9:  # Under $1B
-                min_volume = 100000
-            elif market_cap < 10e9:  # Under $10B
-                min_volume = 500000
-            else:  # Over $10B
-                min_volume = 1000000
-            
-            if avg_volume < min_volume:
-                return None
-            
-            # Check if has options (important!)
-            try:
-                options_dates = self._safe_yfinance_call(lambda: stock.options)
-                has_options = len(options_dates) > 0 if options_dates else False
-            except:
-                has_options = False
-            
-            return {
-                'symbol': ticker,
-                'name': info.get('shortName', ticker),
-                'market_cap': market_cap,
-                'price': current_price,
-                'volume': int(avg_volume),
-                'sector': info.get('sector', 'Unknown'),
-                'industry': info.get('industry', 'Unknown'),
-                'exchange': info.get('exchange', 'Unknown'),
-                'pe_ratio': info.get('forwardPE'),
-                'has_options': has_options,
-                'options_expirations': len(options_dates) if has_options and options_dates else 0,
-                'market_cap_category': self._get_market_cap_category(market_cap)
+            url = "https://api.nasdaq.com/api/screener/stocks"
+            params = {
+                'tableonly': 'true',
+                'limit': 5000,
+                'offset': 0,
+                'download': 'true'
             }
-            
+            logger.debug(f"Fetching from NASDAQ: {url} with params {params}")
+            response = self.session.get(url, params=params, timeout=15)
+            logger.debug(f"NASDAQ response status: {response.status_code}")
+            if response.status_code != 200:
+                logger.warning(f"NASDAQ API call failed: {url} | Status: {response.status_code} | Body: {response.text[:300]}")
+            else:
+                data = response.json()
+                for row in data.get('data', {}).get('rows', []):
+                    try:
+                        market_cap_str = row.get('marketCap', '0')
+                        market_cap = self._parse_market_cap(market_cap_str)
+                        if min_cap <= market_cap <= max_cap:
+                            volume_str = row.get('volume', '0')
+                            volume = self._parse_volume(volume_str)
+                            stock_data = {
+                                'symbol': row.get('symbol', ''),
+                                'name': row.get('name', row.get('symbol', '')),
+                                'market_cap': market_cap,
+                                'price': float(row.get('lastsale', 0)),
+                                'volume': volume,
+                                'avg_volume': volume,
+                                'sector': row.get('sector', 'Unknown'),
+                                'industry': row.get('industry', 'Unknown'),
+                                'exchange': row.get('exchange', 'NASDAQ'),
+                                'pe_ratio': None,
+                                'has_options': True,
+                                'market_cap_category': self._get_market_cap_category(market_cap)
+                            }
+                            stocks.append(stock_data)
+                    except Exception as e:
+                        logger.debug(f"Error parsing NASDAQ row: {e}")
+                        continue
         except Exception as e:
-            logger.debug(f"Error verifying {ticker}: {e}")
-            return None
+            logger.error(f"Error fetching NASDAQ bulk data: {e}")
+        logger.info(f"NASDAQ returned {len(stocks)} stocks")
+        return stocks
+
+    # Remove IEX Cloud related code and add Finnhub support
+    def _fetch_finnhub_symbols(self, api_token: str) -> list:
+        """Fetch all US tickers from Finnhub (requires API token)"""
+        url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={api_token}"
+        try:
+            response = self.session.get(url, timeout=30)
+            if response.status_code == 200:
+                data = response.json()
+                stocks = []
+                for item in data:
+                    # Only include common stocks (type 'Common Stock')
+                    if item.get('type') == 'Common Stock':
+                        stocks.append({
+                            'symbol': item['symbol'],
+                            'name': item.get('description', item['symbol']),
+                            'exchange': item.get('exchange', 'US'),
+                            'has_options': True  # You can refine this if needed
+                        })
+                logger.info(f"Finnhub returned {len(stocks)} US common stocks")
+                return stocks
+            else:
+                logger.warning(f"Finnhub API call failed: {response.status_code}")
+                return []
+        except Exception as e:
+            logger.error(f"Error fetching Finnhub symbols: {e}")
+            return []
+
+    def _enrich_finnhub_tickers(self, tickers: list) -> list:
+        """Enrich Finnhub tickers with price and market cap using yfinance (batch)."""
+        import yfinance as yf
+        import time
+        enriched = []
+        batch_size = 100
+        total = len(tickers)
+        for i in range(0, total, batch_size):
+            batch = tickers[i:i+batch_size]
+            symbols = [t['symbol'] for t in batch]
+            try:
+                yf_tickers = yf.Tickers(' '.join(symbols))
+                for symbol in symbols:
+                    t = next((item for item in batch if item['symbol'] == symbol), None)
+                    if not t:
+                        continue
+                    info = None
+                    try:
+                        info = yf_tickers.tickers[symbol].info
+                    except Exception:
+                        continue
+                    price = info.get('regularMarketPrice')
+                    market_cap = info.get('marketCap')
+                    if price and market_cap:
+                        t['price'] = price
+                        t['market_cap'] = market_cap
+                        t['volume'] = info.get('volume', 0)
+                        t['avg_volume'] = info.get('averageVolume', 0)
+                        t['sector'] = info.get('sector', 'Unknown')
+                        t['industry'] = info.get('industry', 'Unknown')
+                        t['exchange'] = info.get('exchange', t.get('exchange', 'US'))
+                        t['pe_ratio'] = info.get('forwardPE')
+                        t['has_options'] = info.get('options', []) != []
+                        t['market_cap_category'] = self._get_market_cap_category(market_cap)
+                        enriched.append(t)
+                self.rate_limiter.add_jitter()
+            except Exception as e:
+                logger.warning(f"Error enriching batch {i}-{i+batch_size}: {e}")
+            logger.info(f"Enriched {min(i+batch_size, total)}/{total} Finnhub tickers...")
+            time.sleep(1)  # avoid rate limits
+        logger.info(f"Total enriched Finnhub tickers: {len(enriched)}")
+        return enriched
+
+    def _fetch_bulk_stock_data(self, min_cap: float, max_cap: float) -> List[Dict]:
+        """Fetch stock data using bulk sources to avoid individual API calls (Yahoo + Finnhub if available)."""
+        stocks = []
+        logger.info(f"Fetching stocks in range ${min_cap/1e8:.1f}B - ${max_cap/1e9:.0f}B")
+        # Yahoo Finance bulk screener
+        logger.info("Fetching from Yahoo Finance screeners...")
+        yahoo_stocks = self._fetch_yahoo_bulk_screener(min_cap, max_cap)
+        logger.info(f"Found {len(yahoo_stocks)} stocks from Yahoo Finance")
+        stocks.extend(yahoo_stocks)
+        # Additional Yahoo screeners
+        logger.info("Fetching from additional screeners...")
+        additional_stocks = self._fetch_additional_screeners(min_cap, max_cap)
+        logger.info(f"Found {len(additional_stocks)} stocks from additional screeners")
+        stocks.extend(additional_stocks)
+        # Finnhub (if API key is set in config or use provided default)
+        api_token = getattr(self.config.data, 'finnhub_api_token', None)
+        if api_token:
+            logger.info("Fetching from Finnhub symbols...")
+            finnhub_tickers = self._fetch_finnhub_symbols(api_token)
+            logger.info(f"Found {len(finnhub_tickers)} stocks from Finnhub (unenriched)")
+            enriched_finnhub = self._enrich_finnhub_tickers(finnhub_tickers)
+            logger.info(f"Found {len(enriched_finnhub)} enriched Finnhub stocks")
+            stocks.extend(enriched_finnhub)
+        # Remove duplicates
+        seen_symbols = set()
+        unique_stocks = []
+        for stock in stocks:
+            if stock['symbol'] not in seen_symbols:
+                seen_symbols.add(stock['symbol'])
+                unique_stocks.append(stock)
+        logger.info(f"Found {len(unique_stocks)} unique stocks in range ${min_cap} - ${max_cap}")
+        if len(unique_stocks) == 0:
+            logger.error("No stocks found from any data source. This indicates an issue with the APIs or market hours.")
+            logger.error("Check if it's a weekend/holiday or if the APIs have changed.")
+        return unique_stocks
+    
+    def _parse_market_cap(self, market_cap_str: str) -> float:
+        """Parse market cap string to float value"""
+        try:
+            if not market_cap_str or market_cap_str == 'N/A':
+                return 0
+            
+            # Remove common suffixes and convert
+            market_cap_str = market_cap_str.upper().replace(',', '')
+            
+            if 'B' in market_cap_str:
+                value = float(market_cap_str.replace('B', '')) * 1e9
+            elif 'M' in market_cap_str:
+                value = float(market_cap_str.replace('M', '')) * 1e6
+            elif 'T' in market_cap_str:
+                value = float(market_cap_str.replace('T', '')) * 1e12
+            else:
+                value = float(market_cap_str)
+                
+            return value
+        except:
+            return 0
+    
+    def _parse_volume(self, volume_str: str) -> int:
+        """Parse volume string to integer"""
+        try:
+            if not volume_str or volume_str == 'N/A':
+                return 0
+            
+            # Remove commas and convert
+            volume_str = volume_str.replace(',', '')
+            return int(float(volume_str))
+        except:
+            return 0
+    
+    def update_stock_data_with_current_prices(self, stocks: List[Dict]) -> List[Dict]:
+        """Update stock data with current prices and volumes using batch processing"""
+        updated_stocks = []
+        logger.info(f"Updating current data for {len(stocks)} stocks using batch processing...")
+        
+        # Process in large batches using yf.Tickers (much more efficient)
+        batch_size = 200  # yfinance's optimal batch size
+        total_batches = (len(stocks) + batch_size - 1) // batch_size
+        
+        for i in range(0, len(stocks), batch_size):
+            batch = stocks[i:i + batch_size]
+            batch_num = (i // batch_size) + 1
+            
+            try:
+                # Get symbols for this batch
+                symbols = [stock['symbol'] for stock in batch]
+                symbols_str = ' '.join(symbols)
+                
+                # Use yf.Tickers for batch processing (much more efficient)
+                yf_tickers = yf.Tickers(symbols_str)
+                
+                for stock in batch:
+                    symbol = stock['symbol']
+                    try:
+                        # Get ticker info from batch
+                        ticker = yf_tickers.tickers[symbol]
+                        info = ticker.info
+                        
+                        # Update stock data with current info
+                        price = info.get('regularMarketPrice')
+                        volume = info.get('volume', 0)
+                        avg_volume = info.get('averageVolume', 0)
+                        
+                        if price is not None and price > 0:
+                            stock['price'] = price
+                        if volume is not None:
+                            stock['volume'] = volume
+                        if avg_volume is not None:
+                            stock['avg_volume'] = avg_volume
+                            
+                        updated_stocks.append(stock)
+                        
+                    except Exception as e:
+                        # Silently skip stocks that fail (no error logging)
+                        updated_stocks.append(stock)
+                        continue
+                
+                # Progress logging
+                if batch_num % 5 == 0 or batch_num == total_batches:
+                    logger.info(f"Processed batch {batch_num}/{total_batches} ({min(i + batch_size, len(stocks))}/{len(stocks)} stocks)")
+                
+                # Rate limiting between batches
+                if i + batch_size < len(stocks):
+                    time.sleep(1)  # 1 second between batches
+                    
+            except Exception as e:
+                logger.warning(f"Error processing batch {batch_num}: {e}")
+                # Add stocks from failed batch without updates
+                updated_stocks.extend(batch)
+                continue
+        
+        logger.info(f"Updated data for {len(updated_stocks)} stocks")
+        return updated_stocks
     
     def _get_market_cap_category(self, market_cap: float) -> str:
         """Get market cap category for filtering"""
@@ -303,23 +649,39 @@ class DataFetcher:
             options_data = []
             current_price = self.get_quote(symbol)['price']
             
-            # Log available expirations
-            # Silent processing - no verbose output
-            
+            # Sort expirations by days to expiration for better selection
+            expirations_with_days = []
             for exp_date in expirations:
+                exp_datetime = datetime.strptime(exp_date, '%Y-%m-%d')
+                days_to_exp = (exp_datetime - datetime.now()).days
+                if 20 <= days_to_exp <= 70:  # Keep the same range
+                    expirations_with_days.append((exp_date, days_to_exp))
+            
+            # Sort by days to expiration to get variety
+            expirations_with_days.sort(key=lambda x: x[1])
+            
+            # Take a variety of expiration dates (not just the first one)
+            selected_expirations = []
+            if len(expirations_with_days) >= 3:
+                # Take first, middle, and last expiration for variety
+                selected_expirations = [
+                    expirations_with_days[0][0],  # Shortest
+                    expirations_with_days[len(expirations_with_days)//2][0],  # Middle
+                    expirations_with_days[-1][0]  # Longest
+                ]
+            else:
+                selected_expirations = [exp[0] for exp in expirations_with_days]
+            
+            logger.debug(f"Selected {len(selected_expirations)} expiration dates for {symbol}: {selected_expirations}")
+            
+            for exp_date in selected_expirations:
                 # Convert expiration to datetime
                 exp_datetime = datetime.strptime(exp_date, '%Y-%m-%d')
                 days_to_exp = (exp_datetime - datetime.now()).days
-                
-                # RELAXED: Accept 20-70 days instead of 30-60
-                if days_to_exp < 20 or days_to_exp > 70:
-                    continue
                     
                 # Get options data
                 opt_chain = ticker.option_chain(exp_date)
                 calls = opt_chain.calls
-                
-                # Silent processing - no verbose output
                 
                 # Process calls with RELAXED criteria
                 for _, call in calls.iterrows():
@@ -446,68 +808,17 @@ class DataFetcher:
             logger.error(f"Error getting quote for {symbol}: {e}")
             raise
     
-    def get_fundamentals(self, symbol: str) -> Dict:
-        """Get fundamental data with defaults for missing values"""
-        try:
-            ticker = yf.Ticker(symbol)
-            info = ticker.info
-            
-            # Get financial data with error handling
-            try:
-                financials = ticker.quarterly_financials
-                revenue_growth = None
-                if not financials.empty and len(financials.columns) >= 2:
-                    recent_revenue = financials.iloc[0, 0]
-                    previous_revenue = financials.iloc[0, 1]
-                    if previous_revenue and previous_revenue != 0:
-                        revenue_growth = (recent_revenue - previous_revenue) / previous_revenue
-            except:
-                revenue_growth = None
-                    
-            return {
-                'pe_ratio': info.get('forwardPE', info.get('trailingPE', 25)),  # Default PE
-                'peg_ratio': info.get('pegRatio', 1.5),
-                'price_to_book': info.get('priceToBook', 2),
-                'revenue_growth': revenue_growth if revenue_growth else 0.10,  # Default 10% growth
-                'earnings_growth': info.get('earningsQuarterlyGrowth', 0.10),
-                'profit_margin': info.get('profitMargins', 0.10),
-                'institutional_ownership': info.get('heldPercentInstitutions', 0.20),  # Default 20%
-                'insider_ownership': info.get('heldPercentInsiders', 0.10),
-                'short_ratio': info.get('shortRatio', 2),
-                'beta': info.get('beta', 1.2)  # Default beta for growth stocks
-            }
-            
-        except Exception as e:
-            logger.error(f"Error getting fundamentals for {symbol}: {e}")
-            # Return reasonable defaults
-            return {
-                'pe_ratio': 25,
-                'peg_ratio': 1.5,
-                'price_to_book': 2,
-                'revenue_growth': 0.10,
-                'earnings_growth': 0.10,
-                'profit_margin': 0.10,
-                'institutional_ownership': 0.20,
-                'insider_ownership': 0.10,
-                'short_ratio': 2,
-                'beta': 1.2
-            }
-    
     def get_price_history(self, symbol: str, days: int = 100) -> List[Dict]:
-        """Get price history for technical analysis"""
+        """Get price history for technical analysis (no persistent cache, just lru_cache if needed)"""
         try:
             ticker = yf.Ticker(symbol)
             end_date = datetime.now()
             start_date = end_date - timedelta(days=days)
-            
             data = ticker.history(start=start_date, end=end_date)
-            
             if data.empty:
-                # Try shorter period
                 data = ticker.history(period="1mo")
                 if data.empty:
                     return []
-                    
             history = []
             for date, row in data.iterrows():
                 history.append({
@@ -518,12 +829,104 @@ class DataFetcher:
                     'close': row['Close'],
                     'volume': row['Volume']
                 })
-                
             return history
-            
         except Exception as e:
             logger.error(f"Error getting price history for {symbol}: {e}")
             return []
+
+    def get_options_chain(self, symbol: str) -> List[Dict]:
+        """Get options chain with improved analysis for low-volume options (no persistent cache)"""
+        try:
+            ticker = yf.Ticker(symbol)
+            expirations = ticker.options
+            if not expirations:
+                logger.warning(f"No options available for {symbol}")
+                return []
+            options_data = []
+            current_price = self.get_quote(symbol)['price']
+            expirations_with_days = []
+            for exp_date in expirations:
+                exp_datetime = datetime.strptime(exp_date, '%Y-%m-%d')
+                days_to_exp = (exp_datetime - datetime.now()).days
+                if 20 <= days_to_exp <= 70:
+                    expirations_with_days.append((exp_date, days_to_exp))
+            expirations_with_days.sort(key=lambda x: x[1])
+            selected_expirations = []
+            if len(expirations_with_days) >= 3:
+                selected_expirations = [
+                    expirations_with_days[0][0],
+                    expirations_with_days[len(expirations_with_days)//2][0],
+                    expirations_with_days[-1][0]
+                ]
+            else:
+                selected_expirations = [exp[0] for exp in expirations_with_days]
+            for exp_date in selected_expirations:
+                exp_datetime = datetime.strptime(exp_date, '%Y-%m-%d')
+                days_to_exp = (exp_datetime - datetime.now()).days
+                opt_chain = ticker.option_chain(exp_date)
+                calls = opt_chain.calls
+                for _, call in calls.iterrows():
+                    strike = call['strike']
+                    if strike < current_price * 0.85 or strike > current_price * 1.20:
+                        continue
+                    bid = call['bid']
+                    ask = call['ask']
+                    volume = call['volume'] if pd.notna(call['volume']) else 0
+                    open_interest = call['openInterest'] if pd.notna(call['openInterest']) else 0
+                    if ask > 0:
+                        spread_pct = (ask - bid) / ask
+                    else:
+                        spread_pct = 1.0
+                    acceptable = False
+                    liquidity_score = 0
+                    if volume >= self.min_option_volume:
+                        acceptable = True
+                        liquidity_score += 40
+                    if open_interest >= self.min_option_oi:
+                        acceptable = True
+                        liquidity_score += 40
+                    if spread_pct <= self.max_bid_ask_spread and ask > 0:
+                        acceptable = True
+                        liquidity_score += 20
+                    moneyness = abs(strike - current_price) / current_price
+                    if moneyness <= 0.05:
+                        liquidity_score += 20
+                    if not acceptable:
+                        continue
+                    iv = call.get('impliedVolatility', 0)
+                    if iv == 0 or pd.isna(iv):
+                        iv = 0.3 + (spread_pct * 0.5)
+                    option_data = {
+                        'symbol': symbol,
+                        'type': 'CALL',
+                        'strike': strike,
+                        'expiration': exp_date,
+                        'days_to_expiration': days_to_exp,
+                        'bid': bid,
+                        'ask': ask,
+                        'mid': (bid + ask) / 2 if ask > 0 else call.get('lastPrice', 0),
+                        'last': call.get('lastPrice', 0),
+                        'volume': int(volume),
+                        'open_interest': int(open_interest),
+                        'implied_volatility': iv,
+                        'in_the_money': call.get('inTheMoney', False),
+                        'contract_symbol': call.get('contractSymbol', ''),
+                        'spread_pct': spread_pct,
+                        'liquidity_score': liquidity_score,
+                        'delta': self._estimate_delta(current_price, strike, days_to_exp, iv),
+                        'theta': self._estimate_theta(current_price, strike, days_to_exp, iv, ask if ask > 0 else 0.01),
+                        'gamma': self._estimate_gamma(current_price, strike, days_to_exp, iv),
+                        'vega': self._estimate_vega(current_price, strike, days_to_exp, iv),
+                        'iv_percentile': min(95, max(5, iv * 150))
+                    }
+                    options_data.append(option_data)
+            return options_data
+        except Exception as e:
+            logger.error(f"Error getting options chain for {symbol}: {e}")
+            return []
+
+    def save_all_caches(self):
+        self._save_fundamentals_cache()
     
     def _estimate_delta(self, spot: float, strike: float, days: int, iv: float) -> float:
         """Estimate delta using Black-Scholes approximation"""
@@ -604,70 +1007,6 @@ class DataFetcher:
             return round(vega, 3)
         except:
             return 0.1
-    
-    def _fetch_nasdaq_screener(self) -> List[str]:
-        """Fetch stock list from NASDAQ screener API"""
-        tickers = []
-        
-        try:
-            url = "https://api.nasdaq.com/api/screener/stocks"
-            params = {
-                'tableonly': 'true',
-                'limit': 50000,
-                'offset': 0,
-                'download': 'true'
-            }
-            
-            response = self.session.get(url, params=params, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                
-                for row in data.get('data', {}).get('rows', []):
-                    ticker = row.get('symbol', '')
-                    if ticker and not any(c in ticker for c in ['^', '.', '=']):
-                        tickers.append(ticker)
-                        
-        except Exception as e:
-            logger.error(f"Error fetching NASDAQ data: {e}")
-            
-        return tickers
-    
-    def _fetch_yahoo_screener(self) -> List[str]:
-        """Fetch from Yahoo Finance screener API"""
-        tickers = []
-        
-        try:
-            urls = [
-                "https://query1.finance.yahoo.com/v1/finance/trending/US",
-                "https://query2.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=day_gainers&count=500",
-                "https://query2.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=day_losers&count=500",
-                "https://query2.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=most_actives&count=500",
-                "https://query2.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=growth_technology_stocks&count=500",
-                "https://query2.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=undervalued_growth_stocks&count=500"
-            ]
-            
-            for url in urls:
-                try:
-                    response = self.session.get(url, timeout=10)
-                    if response.status_code == 200:
-                        data = response.json()
-                        
-                        # Different response formats
-                        if 'finance' in data:
-                            results = data.get('finance', {}).get('result', [])
-                            if results and 'quotes' in results[0]:
-                                for quote in results[0]['quotes']:
-                                    if 'symbol' in quote:
-                                        tickers.append(quote['symbol'])
-                                        
-                except Exception as e:
-                    logger.debug(f"Error with URL {url}: {e}")
-                    
-        except Exception as e:
-            logger.error(f"Error fetching Yahoo data: {e}")
-            
-        return tickers
     
     def clear_cache(self):
         """Clear data cache"""

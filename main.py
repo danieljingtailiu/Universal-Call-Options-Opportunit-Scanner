@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Market Cap Options Tracker
-Finds the best call options opportunities across all market cap ranges
+Universal Options Opportunity Scanner
+Finds the top 10 best call options opportunities across all market cap ranges
 """
 
 import json
@@ -114,6 +114,10 @@ class OptionsTracker:
                 # Get top movers even if they don't pass all filters
                 filtered = self._get_top_movers(candidates, 30)
             
+            # --- User feedback for rate limits ---
+            if hasattr(self.scanner, 'skipped_due_to_rate_limit') and self.scanner.skipped_due_to_rate_limit > 0:
+                print(f"\n⚠️  Skipped {self.scanner.skipped_due_to_rate_limit} stocks due to rate limits. Try reducing the number of tickers or wait before running again.")
+            
             # Step 3: Analyze options for each
             logger.info(f"\n3. Analyzing options for {len(filtered)} stocks...")
             all_recommendations = []
@@ -136,13 +140,18 @@ class OptionsTracker:
             
             # Sort and diversify recommendations
             if all_recommendations:
-                all_recommendations.sort(key=lambda x: x['score'], reverse=True)
+                # Filter out any recommendations missing 'score'
+                valid_recommendations = [rec for rec in all_recommendations if 'score' in rec]
+                if not valid_recommendations:
+                    logger.warning("No valid recommendations with 'score' found.")
+                    return []
+                valid_recommendations.sort(key=lambda x: x['score'], reverse=True)
                 
                 # Get best option per stock for diversification
                 diversified_recommendations = []
                 seen_stocks = set()
                 
-                for rec in all_recommendations:
+                for rec in valid_recommendations:
                     if rec['symbol'] not in seen_stocks:
                         diversified_recommendations.append(rec)
                         seen_stocks.add(rec['symbol'])
@@ -168,7 +177,7 @@ class OptionsTracker:
     
     def _get_top_movers(self, stocks: List[Dict], n: int = 20) -> List[Dict]:
         """Get stocks with best momentum"""
-        for stock in stocks:
+        for stock in stocks: 
             score = 0
             
             if stock.get('volume', 0) > stock.get('avg_volume', 0):
@@ -189,10 +198,10 @@ class OptionsTracker:
         return stocks[:n]
     
     def _display_top_recommendations(self, recommendations: List[Dict]):
-        """Display top recommendations"""
-        print("\n" + "="*60)
+        """Display top recommendations in a clean, modern format with enhanced reasoning"""
+        print("\n" + "="*70)
         print("🚀 TOP 10 CALL OPTIONS RECOMMENDATIONS")
-        print("="*60)
+        print("="*70)
         
         if not recommendations:
             print("❌ No suitable options found. Try:")
@@ -202,30 +211,56 @@ class OptionsTracker:
             return
         
         for i, rec in enumerate(recommendations[:10], 1):
-            moneyness = rec['current_stock_price'] / rec['strike']
-            breakeven_move = ((rec['strike'] + rec['entry_price']) / rec['current_stock_price'] - 1) * 100
+            moneyness = rec['current_stock_price'] / rec['strike'] if rec.get('strike') else 0
+            breakeven_move = ((rec['strike'] + rec['entry_price']) / rec['current_stock_price'] - 1) * 100 if rec.get('strike') and rec.get('entry_price') and rec.get('current_stock_price') else 0
             
             print(f"\n{i}. {rec['symbol']} @ ${rec['current_stock_price']:.2f}")
             print(f"   ${rec['strike']}C {rec['expiration']} ({rec['days_to_expiration']}d)")
             print(f"   Entry: ${rec['entry_price']:.2f} | BE: +{breakeven_move:.1f}% | Score: {rec['score']:.0f}")
             
-            if rec['recommendation_reasons']:
-                print(f"   ✓ {rec['recommendation_reasons'][0]}")
+            # Enhanced reasoning display
+            if rec.get('recommendation_reasons'):
+                primary_reason = rec['recommendation_reasons'][0]
+                print(f"   ✓ {primary_reason}")
+                
+                # Show additional reasoning for negative momentum stocks
+                if any(keyword in primary_reason.lower() for keyword in ['decline', 'oversold', 'bounce', 'reversal']):
+                    print(f"   📊 Strategy: Mean reversion play on oversold conditions")
+                    print(f"   🎯 Rationale: Recent decline creates opportunity for bounce")
+                elif 'momentum' in primary_reason.lower():
+                    print(f"   📊 Strategy: Momentum continuation play")
+                    print(f"   🎯 Rationale: Strong relative strength suggests continued upside")
+                elif 'small-cap' in primary_reason.lower():
+                    print(f"   📊 Strategy: Small-cap volatility play")
+                    print(f"   🎯 Rationale: Higher volatility increases options premium potential")
+                elif 'sector' in primary_reason.lower():
+                    print(f"   📊 Strategy: Sector rotation play")
+                    print(f"   🎯 Rationale: Growth sector with favorable market conditions")
+                else:
+                    print(f"   📊 Strategy: Technical breakout play")
+                    print(f"   🎯 Rationale: Strong technical setup with favorable risk/reward")
             
-            if rec['expected_return'] > 0.2:
-                print(f"   🚀 High potential")
-            elif rec['expected_return'] > 0:
-                print(f"   📈 Good potential")
+            # Risk assessment
+            if rec.get('expected_return', 0) > 0.2:
+                print(f"   🚀 High potential return")
+            elif rec.get('expected_return', 0) > 0:
+                print(f"   📈 Good potential return")
             else:
-                print(f"   ⚠️  Caution")
+                print(f"   ⚠️  Moderate potential - monitor closely")
+            
+            # Add specific reasoning for negative momentum stocks
+            if rec.get('analysis', {}).get('risk_assessment') == 'High':
+                print(f"   ⚡ Higher risk/higher reward opportunity")
         
-        print("\n" + "="*60)
-        print("💡 Quick Tips:")
-        print("• Only buy when bullish on the stock")
-        print("• Use 1-5% position sizing")
-        print("• Set stop losses and profit targets")
-        print("• Monitor theta decay near expiration")
-        print("="*60)
+        print("\n" + "="*70)
+        print("💡 Strategy Insights:")
+        print("• Negative momentum stocks can offer excellent options opportunities")
+        print("• Oversold conditions often lead to mean reversion bounces")
+        print("• Small-cap stocks provide higher volatility for options premiums")
+        print("• Sector rotation can create momentum in beaten-down names")
+        print("• Use 1-3% position sizing for higher-risk plays")
+        print("• Set tight stop losses and take profits quickly")
+        print("="*70)
     
     def _prompt_for_monitoring(self, recommendations: List[Dict]):
         """Prompt for position monitoring"""
