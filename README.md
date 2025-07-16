@@ -1,8 +1,8 @@
-# 🚀 Market Cap Options Tracker
+# 🚀 Universal Options Opportunity Scanner
 
-> **Advanced Options Trading System for All Market Cap Ranges**
+> **Find the Top 10 Best Call Options Across All Market Cap Ranges**
 
-A sophisticated Python-based trading system that automatically scans, analyzes, and recommends call options opportunities across all market cap ranges. Built with real-time data integration, comprehensive risk management, and intelligent portfolio optimization.
+A sophisticated Python-based system that automatically scans, analyzes, and recommends the top 10 call options opportunities from the entire US stock market, regardless of market cap. Built with real-time data integration, comprehensive risk management, and intelligent portfolio optimization.
 
 ![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
@@ -10,7 +10,7 @@ A sophisticated Python-based trading system that automatically scans, analyzes, 
 
 ## 📊 Project Overview
 
-The Market Cap Options Tracker is designed to identify high-probability call options opportunities across all market cap ranges (from micro-cap to mega-cap) using advanced technical analysis, fundamental screening, and options-specific metrics.
+The Universal Options Opportunity Scanner is designed to identify high-probability call options opportunities across all market cap ranges (from micro-cap to mega-cap) using advanced technical analysis, fundamental screening, and options-specific metrics.
 
 ### Key Features
 
