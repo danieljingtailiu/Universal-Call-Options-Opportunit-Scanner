@@ -63,14 +63,14 @@ class DataFetcher:
         self.fundamentals_cache_file = self.cache_dir / "fundamentals.pkl"
         self.fundamentals_cache = self._load_fundamentals_cache()
         self.fundamentals_cache_expiry_hours = 24  # Cache expiry in hours
-        self.rate_limiter = RateLimiter(max_requests_per_minute=10)
+        self.rate_limiter = RateLimiter(max_requests_per_minute=60)  # Increased from 10 to 60
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
-        self.min_option_volume = 500
-        self.min_option_oi = 1000
-        self.max_bid_ask_spread = 0.25
+        self.min_option_volume = 50    # Reduced from 500 to 50 for more opportunities
+        self.min_option_oi = 100       # Reduced from 1000 to 100 for more opportunities
+        self.max_bid_ask_spread = 0.50  # Increased from 0.25 to 0.50 for more liquid options
         self.max_retries = 3
         self.retry_delay = 2
 
@@ -275,15 +275,20 @@ class DataFetcher:
     def _fetch_additional_screeners(self, min_cap: float, max_cap: float) -> List[Dict]:
         """Fetch from additional Yahoo Finance screeners for more variety, maximizing count."""
         stocks = []
-        # Additional valid screener IDs for more variety
+        # Additional valid screener IDs for more variety - EXPANDED
         additional_ids = [
             "undervalued_large_caps",
-            "aggressive_small_caps",
+            "aggressive_small_caps", 
             "small_cap_gainers",
-            "mid_cap_movers"
+            "mid_cap_movers",
+            "top_mutual_fund_holdings",
+            "portfolio_anchors",
+            "solid_large_cap_growth_funds",
+            "conservative_foreign_funds",
+            "high_volume_stocks"
         ]
         for scrid in additional_ids:
-            for count in [250, 200, 100]:
+            for count in [500, 400, 300, 250]:  # Try larger counts for more variety
                 url = f"https://query2.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds={scrid}&count={count}"
                 try:
                     response = self.session.get(url, timeout=10)
@@ -333,7 +338,7 @@ class DataFetcher:
             "undervalued_growth_stocks"
         ]
         for scrid in screener_ids:
-            for count in [250, 200, 100]:  # Try largest first, fallback if needed
+            for count in [500, 400, 300, 250]:  # Try much larger counts first
                 url = f"https://query2.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds={scrid}&count={count}"
                 try:
                     response = self.session.get(url, timeout=10)
@@ -493,7 +498,13 @@ class DataFetcher:
     def _fetch_bulk_stock_data(self, min_cap: float, max_cap: float) -> List[Dict]:
         """Fetch stock data using bulk sources to avoid individual API calls (Yahoo + Finnhub if available)."""
         stocks = []
-        logger.info(f"Fetching stocks in range ${min_cap/1e8:.1f}B - ${max_cap/1e9:.0f}B")
+        logger.info(f"Fetching stocks in range ${min_cap/1e6:.0f}M - ${max_cap/1e9:.0f}B")
+        
+        # First try loading from custom files for maximum coverage
+        custom_stocks = self._load_custom_stock_universe(min_cap, max_cap)
+        if custom_stocks:
+            stocks.extend(custom_stocks)
+            logger.info(f"Loaded {len(custom_stocks)} stocks from custom universe")
         # Yahoo Finance bulk screener
         logger.info("Fetching from Yahoo Finance screeners...")
         yahoo_stocks = self._fetch_yahoo_bulk_screener(min_cap, max_cap)
@@ -513,6 +524,12 @@ class DataFetcher:
             enriched_finnhub = self._enrich_finnhub_tickers(finnhub_tickers)
             logger.info(f"Found {len(enriched_finnhub)} enriched Finnhub stocks")
             stocks.extend(enriched_finnhub)
+        # Add popular stocks manually if we don't have enough
+        if len(stocks) < 200:
+            manual_stocks = self._add_popular_stocks(min_cap, max_cap)
+            stocks.extend(manual_stocks)
+            logger.info(f"Added {len(manual_stocks)} popular stocks to ensure good coverage")
+        
         # Remove duplicates
         seen_symbols = set()
         unique_stocks = []
@@ -520,7 +537,7 @@ class DataFetcher:
             if stock['symbol'] not in seen_symbols:
                 seen_symbols.add(stock['symbol'])
                 unique_stocks.append(stock)
-        logger.info(f"Found {len(unique_stocks)} unique stocks in range ${min_cap} - ${max_cap}")
+        logger.info(f"Found {len(unique_stocks)} unique stocks in range ${min_cap/1e6:.0f}M - ${max_cap/1e9:.0f}B")
         if len(unique_stocks) == 0:
             logger.error("No stocks found from any data source. This indicates an issue with the APIs or market hours.")
             logger.error("Check if it's a weekend/holiday or if the APIs have changed.")
@@ -660,9 +677,14 @@ class DataFetcher:
             # Sort by days to expiration to get variety
             expirations_with_days.sort(key=lambda x: x[1])
             
-            # Take a variety of expiration dates (not just the first one)
+            # Take MORE expiration dates for better opportunities
             selected_expirations = []
-            if len(expirations_with_days) >= 3:
+            if len(expirations_with_days) >= 5:
+                # Take 5 different expirations for maximum variety
+                indices = [0, len(expirations_with_days)//4, len(expirations_with_days)//2, 
+                          3*len(expirations_with_days)//4, len(expirations_with_days)-1]
+                selected_expirations = [expirations_with_days[i][0] for i in indices]
+            elif len(expirations_with_days) >= 3:
                 # Take first, middle, and last expiration for variety
                 selected_expirations = [
                     expirations_with_days[0][0],  # Shortest
@@ -687,8 +709,8 @@ class DataFetcher:
                 for _, call in calls.iterrows():
                     strike = call['strike']
                     
-                    # RELAXED: Allow wider range (85% to 120% of current price)
-                    if strike < current_price * 0.85 or strike > current_price * 1.20:
+                    # MUCH MORE RELAXED: Allow wider range (70% to 150% of current price)
+                    if strike < current_price * 0.70 or strike > current_price * 1.50:
                         continue
                     
                     # Get option data
@@ -1146,3 +1168,125 @@ class DataFetcher:
         except Exception as e:
             logger.error(f"Error getting option quote for {symbol} {strike} {expiration}: {e}")
             return None
+    
+    def _load_custom_stock_universe(self, min_cap: float, max_cap: float) -> List[Dict]:
+        """Load stocks from custom universe files for maximum coverage"""
+        stocks = []
+        
+        # Define popular stock lists by category
+        popular_lists = {
+            'large_cap': ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'META', 'NVDA', 'AMD', 'NFLX', 'CRM', 
+                         'ADBE', 'PYPL', 'INTC', 'CSCO', 'ORCL', 'IBM', 'UBER', 'LYFT', 'SQ', 'SHOP'],
+            'mid_cap': ['ROKU', 'PINS', 'SNAP', 'TWTR', 'ZM', 'DOCU', 'WORK', 'CRWD', 'OKTA', 'NET',
+                       'DDOG', 'SNOW', 'PATH', 'AI', 'PLTR', 'RBLX', 'U', 'AFRM', 'COIN', 'HOOD'],
+            'small_cap': ['GME', 'AMC', 'BB', 'NOK', 'WISH', 'CLOV', 'SPCE', 'TLRY', 'SNDL', 'MVIS',
+                         'CLNE', 'SOFI', 'LCID', 'RIVN', 'PTON', 'BYND', 'MRNA', 'PFE', 'BNTX', 'NVAX'],
+            'growth': ['ARKK', 'QQQ', 'TQQQ', 'SQQQ', 'SPY', 'IWM', 'VTI', 'UPRO', 'SPXL', 'TNA',
+                      'TECL', 'SOXL', 'CURE', 'DFEN', 'MOON', 'JETS', 'ICLN', 'PBW', 'QCLN', 'ARKQ'],
+            'biotech': ['GILD', 'BIIB', 'REGN', 'VRTX', 'ILMN', 'BMRN', 'ALXN', 'SGEN', 'TECH', 'ISRG',
+                       'INCY', 'EXAS', 'CRSP', 'EDIT', 'NTLA', 'BEAM', 'PACB', 'TDOC', 'VEEV', 'ZTS']
+        }
+        
+        # Get all unique symbols
+        all_symbols = set()
+        for category, symbols in popular_lists.items():
+            all_symbols.update(symbols)
+        
+        # Enrich with market data
+        batch_size = 50
+        symbols_list = list(all_symbols)
+        
+        for i in range(0, len(symbols_list), batch_size):
+            batch = symbols_list[i:i + batch_size]
+            try:
+                yf_tickers = yf.Tickers(' '.join(batch))
+                
+                for symbol in batch:
+                    try:
+                        ticker = yf_tickers.tickers[symbol]
+                        info = ticker.info
+                        
+                        market_cap = info.get('marketCap', 0)
+                        price = info.get('regularMarketPrice', 0)
+                        
+                        if market_cap and price and min_cap <= market_cap <= max_cap:
+                            stock_data = {
+                                'symbol': symbol,
+                                'name': info.get('shortName', symbol),
+                                'market_cap': market_cap,
+                                'price': price,
+                                'volume': info.get('volume', 0),
+                                'avg_volume': info.get('averageVolume', 0),
+                                'sector': info.get('sector', 'Technology'),
+                                'industry': info.get('industry', 'Software'),
+                                'exchange': info.get('exchange', 'NASDAQ'),
+                                'pe_ratio': info.get('forwardPE'),
+                                'has_options': True,  # Most popular stocks have options
+                                'market_cap_category': self._get_market_cap_category(market_cap)
+                            }
+                            stocks.append(stock_data)
+                    except Exception:
+                        continue
+                
+                time.sleep(0.1)  # Rate limiting
+                
+            except Exception as e:
+                logger.warning(f"Error enriching custom batch {i}-{i+batch_size}: {e}")
+                continue
+        
+        return stocks
+    
+    def _add_popular_stocks(self, min_cap: float, max_cap: float) -> List[Dict]:
+        """Add additional popular stocks if we don't have enough coverage"""
+        additional_symbols = [
+            # Popular meme/retail stocks
+            'TSLA', 'GME', 'AMC', 'AAPL', 'MSFT', 'NVDA', 'AMD', 'PLTR', 'BB', 'NOK',
+            # ETFs that are often options targets
+            'SPY', 'QQQ', 'IWM', 'TQQQ', 'SQQQ', 'ARKK', 'XLF', 'XLK', 'GDX', 'TLT',
+            # High-volume options stocks
+            'UBER', 'LYFT', 'SNAP', 'ROKU', 'ZM', 'NFLX', 'DIS', 'BABA', 'NIO', 'XPEV',
+            # Biotech with options activity
+            'MRNA', 'PFE', 'JNJ', 'GILD', 'BIIB', 'REGN', 'VRTX', 'NVAX', 'BNTX', 'OCGN',
+            # Energy and commodities
+            'XOM', 'CVX', 'COP', 'EOG', 'SLB', 'HAL', 'OXY', 'MRO', 'DVN', 'FANG',
+            # Financial services
+            'JPM', 'BAC', 'WFC', 'GS', 'MS', 'C', 'USB', 'PNC', 'TFC', 'COF',
+            # Small cap growth favorites
+            'SOFI', 'HOOD', 'AFRM', 'SQ', 'SHOP', 'CRM', 'SNOW', 'PATH', 'NET', 'CRWD'
+        ]
+        
+        stocks = []
+        try:
+            # Process in batch for efficiency
+            yf_tickers = yf.Tickers(' '.join(additional_symbols))
+            
+            for symbol in additional_symbols:
+                try:
+                    ticker = yf_tickers.tickers[symbol]
+                    info = ticker.info
+                    
+                    market_cap = info.get('marketCap', 0)
+                    price = info.get('regularMarketPrice', 0)
+                    
+                    if market_cap and price and min_cap <= market_cap <= max_cap:
+                        stock_data = {
+                            'symbol': symbol,
+                            'name': info.get('shortName', symbol),
+                            'market_cap': market_cap,
+                            'price': price,
+                            'volume': info.get('volume', 0),
+                            'avg_volume': info.get('averageVolume', 0),
+                            'sector': info.get('sector', 'Technology'),
+                            'industry': info.get('industry', 'Software'),
+                            'exchange': info.get('exchange', 'NASDAQ'),
+                            'pe_ratio': info.get('forwardPE'),
+                            'has_options': True,
+                            'market_cap_category': self._get_market_cap_category(market_cap)
+                        }
+                        stocks.append(stock_data)
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.warning(f"Error adding popular stocks: {e}")
+        
+        return stocks

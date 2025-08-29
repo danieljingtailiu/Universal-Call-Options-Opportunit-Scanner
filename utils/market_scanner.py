@@ -35,8 +35,8 @@ class MarketScanner:
         
         # Add additional fundamental data for each stock (optional for speed)
         final_stocks = []
-        batch_size = 10  # Increased from 3 to 10 for faster processing
-        skip_enriching = False  # Enable fundamental enrichment for better quality
+        batch_size = 50  # Increased from 10 to 50 for much faster processing
+        skip_enriching = True  # Skip enrichment for speed - we have enough basic data
         
         if skip_enriching:
             logger.info(f"Skipping fundamental data enrichment for speed. Using {len(enriched_stocks)} stocks as-is.")
@@ -62,9 +62,9 @@ class MarketScanner:
                     logger.warning(f"Error enriching data for {stock['symbol']}: {e}")
                     # Keep the stock with existing data
                     final_stocks.append(stock)
-            # Rate limiting between batches (reduced from 3 to 1 second)
+            # Rate limiting between batches (reduced to 0.2 seconds for speed)
             if i + batch_size < len(enriched_stocks):
-                time.sleep(1)
+                time.sleep(0.2)  # Much faster processing
         logger.info(f"Successfully enriched {len(final_stocks)} stocks")
         # --- POST-ENRICHMENT MARKET CAP FILTER ---
         min_cap = self.config.trading.market_cap_min
@@ -141,12 +141,12 @@ class MarketScanner:
             ownership_min = 0.10
         if stock.get('institutional_ownership', 0) < ownership_min:
             return False
-        # Skip illiquid and penny stocks
-        if stock.get('volume', 0) < 100000:
+        # More lenient filters for penny stocks and volume
+        if stock.get('volume', 0) < 50000:  # Reduced from 100k to 50k
             return False
-        if stock.get('price', 0) < 1.0:
+        if stock.get('price', 0) < 0.50:  # Reduced from $1 to $0.50
             return False
-        if market_cap < 100_000_000:
+        if market_cap < 50_000_000:  # Reduced from 100M to 50M
             return False
         return True
     
@@ -264,27 +264,27 @@ class MarketScanner:
         rsi = technicals.get('rsi', 50)
         price_change_5d = technicals.get('price_change_5d', 0)
         
-        # Accept stocks with any reasonable momentum
-        if relative_strength >= 0.8:  # Reduced from 1.1
+        # VERY LENIENT - accept almost all stocks
+        if relative_strength >= 0.3:  # Much more lenient
             return True
             
-        # Accept stocks with any positive price movement
-        if price_change_20d >= -0.10:  # Reduced from 0.05 (allow 10% decline)
+        # Accept stocks with moderate price movement
+        if price_change_20d >= -0.25:  # Allow 25% decline
             return True
             
-        # Accept stocks with any volume
-        if volume_ratio >= 0.5:  # Reduced from 1.2
+        # Accept stocks with any reasonable volume
+        if volume_ratio >= 0.2:  # Very lenient volume requirement
             return True
             
-        # Accept stocks that aren't extremely overbought
-        if rsi <= 85:  # Increased from 80
+        # Accept most stocks based on RSI
+        if rsi <= 95:  # Very lenient RSI
             return True
             
-        # Accept stocks with any recent movement
-        if price_change_5d >= -0.05:  # Reduced from 0.02 (allow 5% decline)
+        # Accept stocks with recent movement
+        if price_change_5d >= -0.15:  # Allow 15% decline
             return True
             
-        # If all else fails, accept the stock anyway for testing
+        # If all else fails, accept the stock anyway
         return True
 
 if __name__ == "__main__":
