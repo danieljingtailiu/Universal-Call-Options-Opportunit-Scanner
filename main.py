@@ -122,8 +122,8 @@ class OptionsTracker:
             logger.info(f"\n3. Analyzing options for {len(filtered)} stocks...")
             all_recommendations = []
             
-            # Analyze stocks for diversification
-            stocks_to_analyze = min(len(filtered), 25)
+            # Analyze stocks for diversification - SIGNIFICANTLY INCREASED
+            stocks_to_analyze = min(len(filtered), 100)  # Increased from 25 to 100
             
             for i, stock in enumerate(filtered[:stocks_to_analyze], 1):
                 
@@ -156,11 +156,11 @@ class OptionsTracker:
                         diversified_recommendations.append(rec)
                         seen_stocks.add(rec['symbol'])
                         
-                        if len(diversified_recommendations) >= 10:
+                        if len(diversified_recommendations) >= 50:  # Increased from 10 to 50
                             break
                 
-                # Display recommendations
-                self._display_top_recommendations(diversified_recommendations)
+                # Display recommendations - show top 20 instead of 10
+                self._display_top_recommendations(diversified_recommendations[:20])
                 self._prompt_for_monitoring(diversified_recommendations)
             else:
                 logger.warning("\nNo option opportunities found. Try:")
@@ -210,7 +210,7 @@ class OptionsTracker:
             print("   • Wait for rate limits to reset")
             return
         
-        for i, rec in enumerate(recommendations[:10], 1):
+        for i, rec in enumerate(recommendations[:20], 1):  # Show top 20 instead of 10
             moneyness = rec['current_stock_price'] / rec['strike'] if rec.get('strike') else 0
             breakeven_move = ((rec['strike'] + rec['entry_price']) / rec['current_stock_price'] - 1) * 100 if rec.get('strike') and rec.get('entry_price') and rec.get('current_stock_price') else 0
             
@@ -265,7 +265,7 @@ class OptionsTracker:
     def _prompt_for_monitoring(self, recommendations: List[Dict]):
         """Prompt for position monitoring"""
         print("\n📊 MONITOR POSITIONS?")
-        print("Enter numbers (1-10) separated by commas, or 'n' for none:")
+        print("Enter numbers (1-20) separated by commas, or 'n' for none:")
         
         try:
             user_input = input("> ").strip()
@@ -276,7 +276,7 @@ class OptionsTracker:
             selections = [int(x.strip()) - 1 for x in user_input.split(',')]
             
             for idx in selections:
-                if 0 <= idx < min(len(recommendations), 10):
+                if 0 <= idx < min(len(recommendations), 20):
                     rec = recommendations[idx]
                     
                     print(f"\nHow many contracts of {rec['symbol']} ${rec['strike']}C?")

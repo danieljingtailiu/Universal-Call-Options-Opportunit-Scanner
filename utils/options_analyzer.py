@@ -75,26 +75,26 @@ class OptionsAnalyzer:
         # Get option value analysis
         value_analysis = self._calculate_option_value_analysis(current_price, option)
         
-        # 1. Moneyness Score (25 points) - Most important for call options
+        # 1. Moneyness Score (25 points) - More lenient for all strikes
         moneyness = value_analysis.get('moneyness', 1.0)
-        if 0.95 <= moneyness <= 1.05:  # ATM to slightly OTM - optimal for calls
+        if 0.90 <= moneyness <= 1.10:  # Wider ATM range
             score += 25
-            reasons.append(f"Optimal strike near money (${option['strike']:.2f})")
-        elif 1.05 < moneyness <= 1.15:  # Slightly OTM - good for momentum
+            reasons.append(f"Excellent strike near money (${option['strike']:.2f})")
+        elif 1.10 < moneyness <= 1.25:  # OTM - good for momentum  
+            score += 22
+            reasons.append(f"Good OTM strike for upside (${option['strike']:.2f})")
+        elif 0.80 <= moneyness < 0.90:  # ITM - safer
             score += 20
-            reasons.append(f"Good OTM strike for momentum (${option['strike']:.2f})")
-        elif 0.90 <= moneyness < 0.95:  # Slightly ITM - safer
+            reasons.append(f"ITM with intrinsic value (${option['strike']:.2f})")
+        elif 1.25 < moneyness <= 1.50:  # Further OTM - higher leverage
             score += 18
-            reasons.append(f"Slightly ITM with intrinsic value (${option['strike']:.2f})")
-        elif 1.15 < moneyness <= 1.25:  # Further OTM - higher risk/reward
+            reasons.append(f"Higher leverage OTM strike (${option['strike']:.2f})")
+        elif moneyness < 0.80:  # Deep ITM
             score += 15
-            reasons.append(f"Further OTM for higher leverage (${option['strike']:.2f})")
-        elif moneyness < 0.90:  # Deep ITM - expensive
-            score += 10
-            reasons.append(f"Deep ITM - expensive but safer (${option['strike']:.2f})")
-        elif moneyness > 1.25:  # Far OTM - very risky
-            score += 5
-            reasons.append(f"Far OTM - high risk (${option['strike']:.2f})")
+            reasons.append(f"Deep ITM - conservative play (${option['strike']:.2f})")
+        elif moneyness > 1.50:  # Far OTM
+            score += 12
+            reasons.append(f"Far OTM - lottery ticket (${option['strike']:.2f})")
         
         # 2. Time Value Analysis (20 points)
         time_value_pct = value_analysis.get('time_value_pct', 50)
@@ -116,31 +116,35 @@ class OptionsAnalyzer:
             score += 8
             reasons.append(f"Long expiration ({days} days) - expensive time value")
         
-        # 3. Liquidity Score (20 points)
+        # 3. Liquidity Score (20 points) - More lenient for low-volume options
         liquidity_score = value_analysis.get('liquidity_score', 0)
         volume = option.get('volume', 0)
         open_interest = option.get('open_interest', 0)
         spread_pct = option.get('spread_pct', 0.5)
         
-        # Normalize liquidity score
-        normalized_liquidity = min(liquidity_score / 100 * 20, 20)
+        # More generous liquidity scoring
+        normalized_liquidity = min(liquidity_score / 80 * 20, 20)  # Reduced denominator
         score += normalized_liquidity
         
-        if volume > 100:
-            reasons.append(f"High volume ({volume}) - easy to trade")
-        elif volume > 10:
-            reasons.append(f"Decent volume ({volume}) - tradeable")
-        elif open_interest > 500:
-            reasons.append(f"High open interest ({open_interest}) - good liquidity")
-        elif open_interest > 100:
-            reasons.append(f"Good open interest ({open_interest})")
+        if volume > 50:  # Reduced from 100
+            reasons.append(f"Good volume ({volume}) - tradeable")
+        elif volume > 5:  # Reduced from 10
+            reasons.append(f"Some volume ({volume}) - can trade")
+        elif open_interest > 100:  # Reduced from 500
+            reasons.append(f"Good open interest ({open_interest}) - has liquidity")
+        elif open_interest > 25:  # Reduced from 100
+            reasons.append(f"Some open interest ({open_interest})")
+        else:
+            reasons.append("Low liquidity - use limit orders")
         
-        if spread_pct < 0.1:
-            reasons.append("Tight bid-ask spread")
-        elif spread_pct < 0.2:
+        if spread_pct < 0.15:  # More lenient
+            reasons.append("Reasonable bid-ask spread")
+        elif spread_pct < 0.35:  # More lenient
             reasons.append("Acceptable spread")
-        elif spread_pct < 0.35:
-            reasons.append("Wide spread but tradeable")
+        elif spread_pct < 0.50:  # More lenient
+            reasons.append("Wide spread - use limit orders")
+        else:
+            reasons.append("Very wide spread - trade carefully")
         
         # 4. Greeks Score (15 points)
         delta = option.get('delta', 0.5)
@@ -195,24 +199,24 @@ class OptionsAnalyzer:
             score += 5
             reasons.append(f"Low IV ({iv:.1%}) - cheap but low volatility")
         
-        # 6. Expected Return Analysis (10 points)
+        # 6. Expected Return Analysis (10 points) - More optimistic
         expected_return = self._calculate_expected_return(current_price, option, stock.get('atr', current_price * 0.02))
         
-        if expected_return > 0.3:
+        if expected_return > 0.2:  # Reduced from 0.3
             score += 10
             reasons.append(f"High expected return ({expected_return:.1%})")
-        elif expected_return > 0.1:
-            score += 7
+        elif expected_return > 0.05:  # Reduced from 0.1
+            score += 8
             reasons.append(f"Good expected return ({expected_return:.1%})")
-        elif expected_return > 0:
-            score += 4
-            reasons.append(f"Positive expected return ({expected_return:.1%})")
-        elif expected_return > -0.2:
-            score += 2
-            reasons.append(f"Moderate expected return ({expected_return:.1%})")
+        elif expected_return > -0.1:  # More lenient
+            score += 6
+            reasons.append(f"Reasonable expected return ({expected_return:.1%})")
+        elif expected_return > -0.3:  # More lenient
+            score += 3
+            reasons.append(f"Acceptable expected return ({expected_return:.1%})")
         else:
-            score -= 5
-            reasons.append(f"Poor expected return ({expected_return:.1%})")
+            score += 1  # Still give some points
+            reasons.append(f"Lower expected return ({expected_return:.1%}) but tradeable")
         
         # 7. Technical Setup Bonus (up to 15 points) - Enhanced for negative momentum analysis
         technical_bonus = 0
