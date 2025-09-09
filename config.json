@@ -1,10 +1,10 @@
 {
   "trading": {
     "market_cap_min": 100000000,
-    "market_cap_max": 1000000000000,
-    "min_days_to_expiration": 7,
+    "market_cap_max": 500000000000,
+    "min_days_to_expiration": 14,
     "max_days_to_expiration": 365,
-    "target_days_to_expiration": 45,
+    "target_days_to_expiration": 60,
     "max_position_size": 0.05,
     "max_portfolio_risk": 0.20,
     "stop_loss_percent": 0.30,
@@ -14,8 +14,8 @@
     "max_iv_percentile": 75,
     "rsi_oversold": 30,
     "rsi_overbought": 70,
-    "min_volume": 1000000,
-    "min_option_volume": 500,
+    "min_volume": 500000,
+    "min_option_volume": 5000,
     "min_option_oi": 1000,
     "theta_exit_threshold": 0.03,
     "profit_exit_threshold": 0.40,
@@ -33,11 +33,11 @@
     "min_revenue_growth": 0.15,
     "min_earnings_growth": 0.10,
     "max_pe_ratio": 100,
-    "min_institutional_ownership": 0.05,
-    "min_relative_strength": 1.1,
+    "min_institutional_ownership": 0.01,
+    "min_relative_strength": 0.8,
     "min_price_above_ma": 0.05,
-    "micro_cap_volume_min": 500000,
-    "small_cap_volume_min": 1000000,
+    "micro_cap_volume_min": 100000,
+    "small_cap_volume_min": 500000,
     "mid_cap_volume_min": 2000000,
     "large_cap_volume_min": 5000000,
     "mega_cap_volume_min": 10000000,
@@ -59,6 +59,6 @@
     "fundamentals_refresh_interval": 1440,
     "use_cache": true,
     "cache_expiry_minutes": 60,
-    "finnhub_api_token": "YOUR_API_KEY_HERE"
+    "finnhub_api_token": "d2oivh1r01qga5g9gpp0d2oivh1r01qga5g9gppg"
   }
 }

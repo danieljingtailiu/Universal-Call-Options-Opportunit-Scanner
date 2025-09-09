@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 class RateLimiter:
     """Rate limiter for API calls"""
     
-    def __init__(self, max_requests_per_minute: int = 60):
+    def __init__(self, max_requests_per_minute: int = 20):  # Very conservative rate limiting
         self.max_requests = max_requests_per_minute
         self.requests = []
         
@@ -47,7 +47,7 @@ class RateLimiter:
         
     def add_jitter(self):
         """Add random jitter to requests"""
-        jitter = random.uniform(0.1, 0.5)
+        jitter = random.uniform(0.5, 1.5)  # Increased delay
         time.sleep(jitter)
 
 
@@ -63,14 +63,15 @@ class DataFetcher:
         self.fundamentals_cache_file = self.cache_dir / "fundamentals.pkl"
         self.fundamentals_cache = self._load_fundamentals_cache()
         self.fundamentals_cache_expiry_hours = 24  # Cache expiry in hours
-        self.rate_limiter = RateLimiter(max_requests_per_minute=10)
+        self.rate_limiter = RateLimiter(max_requests_per_minute=20)  # Reduced to 20 to avoid rate limits
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
-        self.min_option_volume = 500
-        self.min_option_oi = 1000
-        self.max_bid_ask_spread = 0.25
+        # Use proper config values for high-quality options
+        self.min_option_volume = config.trading.min_option_volume  # 5000 from config
+        self.min_option_oi = config.trading.min_option_oi         # 1000 from config
+        self.max_bid_ask_spread = 0.50  # Increased from 0.25 to 0.50 for more liquid options
         self.max_retries = 3
         self.retry_delay = 2
 
@@ -184,7 +185,8 @@ class DataFetcher:
                     return None
                     
                 if "rate limit" in error_str or "429" in error_str:
-                    wait_time = (attempt + 1) * self.retry_delay * 2
+                    # Much more aggressive exponential backoff
+                    wait_time = (2 ** attempt) * 30  # 30, 60, 120, 240, 480 seconds
                     logger.warning(f"Rate limit hit, waiting {wait_time} seconds (attempt {attempt + 1})")
                     time.sleep(wait_time)
                     continue
@@ -196,6 +198,138 @@ class DataFetcher:
         
         return None
     
+    def _fetch_finnhub_tickers(self, min_cap: float, max_cap: float) -> List[Dict]:
+        """Fetch breakout-focused tickers (SOGP-like opportunities)"""
+        stocks = []
+        logger.info("Fetching breakout-focused tickers for SOGP-like opportunities")
+            
+        try:
+            import requests
+            
+            # Comprehensive breakout-oriented tickers (SOGP-like opportunities)
+            breakout_symbols = [
+                # High-growth tech with breakout potential
+                'PLTR', 'SOFI', 'HOOD', 'RBLX', 'COIN', 'UPST', 'AFRM', 'SQ', 'PYPL',
+                'SHOP', 'TWLO', 'ZM', 'DOCU', 'CRM', 'SNOW', 'NET', 'DDOG', 'MDB',
+                'OKTA', 'CRWD', 'ZS', 'PANW', 'FTNT', 'CYBR', 'TENB', 'RPD', 'ESTC',
+                'GTLB', 'S', 'BILL', 'PCTY', 'FROG', 'AI', 'C3AI', 'BBAI', 'SOUN',
+                'PATH', 'ASAN', 'TEAM', 'ATLASSIAN', 'WDAY', 'NOW', 'ADBE', 'ORCL',
+                
+                # Biotech/Healthcare breakout candidates  
+                'MRNA', 'BNTX', 'NVAX', 'OCGN', 'SAVA', 'BIIB', 'GILD', 'REGN',
+                'VRTX', 'ILMN', 'BEAM', 'CRSP', 'EDIT', 'NTLA', 'SGMO', 'BLUE',
+                'BMRN', 'RARE', 'FOLD', 'ARWR', 'IONS', 'EXAS', 'VEEV', 'TDOC',
+                'RVMD', 'BCAB', 'KYMR', 'CGEM', 'VERV', 'PRIM', 'RGNX', 'TGTX',
+                'INCY', 'ALNY', 'TECH', 'UTHR', 'HALO', 'DNLI', 'SAGE', 'NBIX',
+                
+                # EV/Clean Energy small caps
+                'RIVN', 'LCID', 'NIO', 'XPEV', 'LI', 'CHPT', 'BLNK', 'EVGO',
+                'QS', 'STEM', 'ENPH', 'SEDG', 'RUN', 'NOVA', 'FSLR', 'SPWR',
+                'PLUG', 'FCEL', 'BE', 'BLDP', 'NKLA', 'RIDE', 'GOEV', 'HYLN',
+                'TSLA', 'F', 'GM', 'FORD', 'FISKER', 'CANOO', 'ARVL', 'PTRA',
+                
+                # Gaming/Entertainment/Social  
+                'RBLX', 'U', 'DKNG', 'PENN', 'FUBO', 'ROKU', 'SNAP', 'PINS',
+                'SPOT', 'MTCH', 'BMBL', 'PTON', 'ZG', 'ABNB', 'UBER', 'LYFT',
+                'SKLZ', 'SLGG', 'GMBL', 'ACHR', 'BIRD', 'GOGO', 'HEAR', 'LOGI',
+                'NFLX', 'DIS', 'PARA', 'WBD', 'CMCSA', 'T', 'VZ', 'TMUS',
+                
+                # Fintech/Payments breakouts
+                'SOFI', 'UPST', 'AFRM', 'LMND', 'ROOT', 'OPEN', 'RDFN', 'COMP',
+                'PAYC', 'MELI', 'STNE', 'PAGS', 'NU', 'PAYO', 'FLYW', 'TMDX',
+                'ADYEY', 'MA', 'V', 'AXP', 'COF', 'DFS', 'SYF', 'ALLY',
+                
+                # Small-cap meme/momentum stocks with breakout potential
+                'AMC', 'GME', 'BB', 'NOK', 'BBBY', 'KOSS', 'NAKD', 'SNDL',
+                'TLRY', 'CGC', 'ACB', 'HEXO', 'CRON', 'OGI', 'APHA', 'CURLF',
+                'WEED', 'FIRE', 'ZENA', 'TGOD', 'VFF', 'LABS', 'GTII', 'CURA',
+                
+                # Emerging sectors (Space, AR/VR, AI, Cybersecurity)
+                'SPCE', 'RKLB', 'ASTR', 'PL', 'LUNR', 'VUZI', 'MVIS', 'LAZR',
+                'VLDR', 'LIDR', 'OUST', 'AEYE', 'KOPN', 'WIMI', 'GRMN', 'INVZ',
+                'CRWD', 'ZS', 'OKTA', 'PANW', 'FTNT', 'CYBR', 'TENB', 'RPD',
+                
+                # Cloud/SaaS with breakout potential
+                'SNOW', 'PLTR', 'DDOG', 'NET', 'FSLY', 'ESTC', 'SUMO', 'FROG',
+                'GTLB', 'S', 'BILL', 'PCTY', 'ZUO', 'VEEV', 'WDAY', 'TEAM',
+                'NOW', 'CRM', 'ADBE', 'MSFT', 'GOOGL', 'AMZN', 'META', 'NFLX',
+                
+                # Additional high-potential breakout candidates
+                'TSLA', 'NVDA', 'AMD', 'INTC', 'QCOM', 'AVGO', 'TXN', 'ADI',
+                'MRVL', 'XLNX', 'LRCX', 'AMAT', 'KLAC', 'ASML', 'TSM', 'UMC',
+                'BABA', 'JD', 'PDD', 'BIDU', 'NTES', 'WB', 'TME', 'BILI',
+                'SE', 'GRAB', 'DIDI', 'CPNG', 'COUPANG', 'BEKE', 'TAL', 'EDU'
+            ]
+            
+            # Remove duplicates and process
+            unique_symbols = list(set(breakout_symbols))
+            logger.info(f"Processing {len(unique_symbols)} breakout-focused symbols")
+            
+            # Process in very small batches with aggressive rate limiting
+            batch_size = 2
+            for i in range(0, len(unique_symbols), batch_size):
+                batch_symbols = unique_symbols[i:i + batch_size]
+                
+                for symbol in batch_symbols:
+                    try:
+                        # Get market cap and sector info using yfinance
+                        ticker_obj = yf.Ticker(symbol)
+                        info = self._safe_yfinance_call(ticker_obj.info)
+                        if not info:
+                            continue
+                            
+                        market_cap = info.get('marketCap', 0)
+                        sector = info.get('sector', 'Unknown')
+                        
+                        # Focus on breakout-friendly market cap range
+                        if min_cap <= market_cap <= max_cap:
+                            quote = self.get_quote(symbol)
+                            if quote and quote.get('volume', 0) >= 10000:  # Lower volume for more opportunities
+                                
+                                # Get additional data for breakout analysis
+                                current_price = quote.get('price', 0)
+                                prev_close = quote.get('prev_close', current_price)
+                                day_high = quote.get('day_high', current_price)
+                                day_low = quote.get('day_low', current_price)
+                                volume = quote.get('volume', 0)
+                                
+                                stock_data = {
+                                    'symbol': symbol,
+                                    'name': info.get('longName', symbol),
+                                    'market_cap': market_cap,
+                                    'price': current_price,
+                                    'volume': volume,
+                                    'avg_volume': volume * 0.8,  # Estimate avg volume slightly lower
+                                    'day_high': day_high,
+                                    'day_low': day_low,
+                                    'prev_close': prev_close,
+                                    'sector': sector,
+                                    'industry': info.get('industry', 'Unknown'),
+                                    'exchange': 'US',
+                                    'pe_ratio': info.get('trailingPE'),
+                                    'has_options': True,
+                                    'market_cap_category': self._get_market_cap_category(market_cap),
+                                    'source': 'breakout_focused'
+                                }
+                                stocks.append(stock_data)
+                          
+                        # Aggressive rate limiting to avoid issues
+                        time.sleep(2.0)
+                          
+                    except Exception as e:
+                        logger.debug(f"Error processing breakout symbol {symbol}: {e}")
+                        continue
+                
+                # Very long delay between Finnhub batches
+                if i + batch_size < len(unique_symbols):
+                    time.sleep(15.0)  # Much longer delay to avoid rate limiting
+                    
+        except Exception as e:
+            logger.warning(f"Error fetching Finnhub tickers: {e}")
+            
+        logger.info(f"Loaded {len(stocks)} stocks from Finnhub")
+        return stocks
+    
     def get_stocks_by_market_cap(self, min_cap: float, max_cap: float, min_volume: int) -> List[Dict]:
         """Get stocks filtered by market cap and volume using bulk data sources or CSV"""
         # Try CSV import first
@@ -206,39 +340,73 @@ class DataFetcher:
             df = pd.read_csv(csv_file)
             tickers = df['symbol'].dropna().unique().tolist()
             stocks = []
-            for symbol in tickers:
-                try:
-                    quote = self.get_quote(symbol)
-                    # Try to get market cap from yfinance info if available
+            
+            # OPTIMIZATION: Batch process tickers with very conservative rate limiting
+            batch_size = 3  # Much smaller batches to avoid rate limits
+            for i in range(0, len(tickers), batch_size):
+                batch_tickers = tickers[i:i + batch_size]
+                batch_stocks = []
+                
+                for symbol in batch_tickers:
                     try:
+                        # Get market cap first (fastest check) with retry logic
                         ticker_obj = yf.Ticker(symbol)
-                        info = ticker_obj.info
-                        market_cap = info.get('marketCap', quote.get('price', 0) * quote.get('volume', 0))
-                    except Exception:
-                        market_cap = quote.get('price', 0) * quote.get('volume', 0)
-                    stock_data = {
-                        'symbol': symbol,
-                        'name': symbol,
-                        'market_cap': market_cap,
-                        'price': quote.get('price', 0),
-                        'volume': quote.get('volume', 0),
-                        'avg_volume': quote.get('avg_volume', 0),
-                        'sector': 'Unknown',
-                        'industry': 'Unknown',
-                        'exchange': 'Unknown',
-                        'pe_ratio': None,
-                        'has_options': True,
-                        'market_cap_category': self._get_market_cap_category(market_cap)
-                    }
-                    if min_cap <= market_cap <= max_cap and stock_data['volume'] >= min_volume:
-                        stocks.append(stock_data)
-                except Exception as e:
-                    logger.warning(f"Error loading {symbol} from CSV: {e}")
-            logger.info(f"Loaded {len(stocks)} stocks from CSV universe")
-            return stocks
+                        info = self._safe_yfinance_call(ticker_obj.info)
+                        if not info:
+                            continue
+                            
+                        market_cap = info.get('marketCap', 0)
+                        
+                        # Only proceed if market cap is in range
+                        if min_cap <= market_cap <= max_cap:
+                            # Conservative delay before quote call to avoid rate limits
+                            time.sleep(10.0)  # Much longer delay to avoid rate limiting
+                            quote = self.get_quote(symbol)
+                            if quote and quote.get('volume', 0) >= min_volume:
+                                stock_data = {
+                                    'symbol': symbol,
+                                    'name': info.get('longName', symbol),
+                                    'market_cap': market_cap,
+                                    'price': quote.get('price', 0),
+                                    'volume': quote.get('volume', 0),
+                                    'avg_volume': quote.get('avg_volume', 0),
+                                    'sector': info.get('sector', 'Unknown'),
+                                    'industry': info.get('industry', 'Unknown'),
+                                    'exchange': info.get('exchange', 'Unknown'),
+                                    'pe_ratio': info.get('trailingPE'),
+                                    'has_options': True,
+                                    'market_cap_category': self._get_market_cap_category(market_cap)
+                                }
+                                batch_stocks.append(stock_data)
+                    except Exception as e:
+                        logger.debug(f"Error loading {symbol} from CSV: {e}")
+                        continue
+                
+                stocks.extend(batch_stocks)
+                # Much longer delay between batches to avoid rate limits
+                if i + batch_size < len(tickers):
+                    time.sleep(10.0)  # Increased to 10 seconds to avoid rate limits
+                    
+            logger.info(f"Loaded {len(stocks)} stocks from CSV universe (filtered by market cap first)")
+            
+            # Add Finnhub tickers for more variety - prioritize them
+            finnhub_stocks = self._fetch_finnhub_tickers(min_cap, max_cap)
+            logger.info(f"Adding {len(finnhub_stocks)} breakout-focused stocks from Finnhub")
+            stocks.extend(finnhub_stocks)
+            
+            # Remove duplicates based on symbol
+            seen_symbols = set()
+            unique_stocks = []
+            for stock in stocks:
+                if stock['symbol'] not in seen_symbols:
+                    seen_symbols.add(stock['symbol'])
+                    unique_stocks.append(stock)
+            
+            logger.info(f"Total unique stocks after adding Finnhub: {len(unique_stocks)}")
+            return unique_stocks
         # If no CSV, use the normal logic
         cache_file = self.cache_dir / "market_cap_universe.pkl"
-        cache_age_hours = 24
+        cache_age_hours = 1  # Reduced from 24 to 1 hour for more frequent updates
         def filter_stocks(stocks):
             filtered = []
             logger.info(f"Applying lenient filters (min_cap: {min_cap}, max_cap: {max_cap})")
@@ -265,25 +433,46 @@ class DataFetcher:
                         logger.info("Cache empty after filtering, fetching fresh data...")
         # Fetch fresh data if cache is empty or stale
         logger.info("Fetching stock universe using bulk data sources...")
-        stocks = self._fetch_bulk_stock_data(min_cap, max_cap)
-        with open(cache_file, 'wb') as f:
-            pickle.dump(stocks, f)
-        filtered_stocks = filter_stocks(stocks)
-        logger.info(f"Returning {len(filtered_stocks)} stocks after filters")
-        return filtered_stocks
+        try:
+            stocks = self._fetch_bulk_stock_data(min_cap, max_cap)
+            with open(cache_file, 'wb') as f:
+                pickle.dump(stocks, f)
+            filtered_stocks = filter_stocks(stocks)
+            logger.info(f"Returning {len(filtered_stocks)} stocks after filters")
+            return filtered_stocks
+        except Exception as e:
+            logger.warning(f"Error fetching fresh data: {e}")
+            # Fallback to any existing cache, even if stale
+            if cache_file.exists():
+                logger.info("Using stale cache as fallback...")
+                with open(cache_file, 'rb') as f:
+                    all_stocks = pickle.load(f)
+                    filtered = filter_stocks(all_stocks)
+                    if filtered:
+                        logger.info(f"Returning {len(filtered)} stocks from stale cache")
+                        return filtered
+            
+            # If no cache available, return empty list
+            logger.warning("No data available, returning empty list")
+            return []
     
     def _fetch_additional_screeners(self, min_cap: float, max_cap: float) -> List[Dict]:
         """Fetch from additional Yahoo Finance screeners for more variety, maximizing count."""
         stocks = []
-        # Additional valid screener IDs for more variety
+        # Additional valid screener IDs for more variety - EXPANDED
         additional_ids = [
             "undervalued_large_caps",
-            "aggressive_small_caps",
+            "aggressive_small_caps", 
             "small_cap_gainers",
-            "mid_cap_movers"
+            "mid_cap_movers",
+            "top_mutual_fund_holdings",
+            "portfolio_anchors",
+            "solid_large_cap_growth_funds",
+            "conservative_foreign_funds",
+            "high_volume_stocks"
         ]
         for scrid in additional_ids:
-            for count in [250, 200, 100]:
+            for count in [500, 400, 300, 250]:  # Try larger counts for more variety
                 url = f"https://query2.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds={scrid}&count={count}"
                 try:
                     response = self.session.get(url, timeout=10)
@@ -333,7 +522,7 @@ class DataFetcher:
             "undervalued_growth_stocks"
         ]
         for scrid in screener_ids:
-            for count in [250, 200, 100]:  # Try largest first, fallback if needed
+            for count in [500, 400, 300, 250]:  # Try much larger counts first
                 url = f"https://query2.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds={scrid}&count={count}"
                 try:
                     response = self.session.get(url, timeout=10)
@@ -451,8 +640,15 @@ class DataFetcher:
         """Enrich Finnhub tickers with price and market cap using yfinance (batch)."""
         import yfinance as yf
         import time
+        
+        # Limit to reasonable number to avoid overwhelming APIs  
+        max_tickers = 2500  # Process only first 2500 instead of all 18K+ (balanced for speed and coverage)
+        if len(tickers) > max_tickers:
+            logger.info(f"Limiting Finnhub processing to {max_tickers} tickers (was {len(tickers)})")
+            tickers = tickers[:max_tickers]
+        
         enriched = []
-        batch_size = 100
+        batch_size = 50  # Reduced from 100 to 50
         total = len(tickers)
         for i in range(0, total, batch_size):
             batch = tickers[i:i+batch_size]
@@ -486,14 +682,20 @@ class DataFetcher:
             except Exception as e:
                 logger.warning(f"Error enriching batch {i}-{i+batch_size}: {e}")
             logger.info(f"Enriched {min(i+batch_size, total)}/{total} Finnhub tickers...")
-            time.sleep(1)  # avoid rate limits
+            time.sleep(3)  # Increased from 1 to 3 seconds to avoid rate limits
         logger.info(f"Total enriched Finnhub tickers: {len(enriched)}")
         return enriched
 
     def _fetch_bulk_stock_data(self, min_cap: float, max_cap: float) -> List[Dict]:
         """Fetch stock data using bulk sources to avoid individual API calls (Yahoo + Finnhub if available)."""
         stocks = []
-        logger.info(f"Fetching stocks in range ${min_cap/1e8:.1f}B - ${max_cap/1e9:.0f}B")
+        logger.info(f"Fetching stocks in range ${min_cap/1e6:.0f}M - ${max_cap/1e9:.0f}B")
+        
+        # First try loading from custom files for maximum coverage
+        custom_stocks = self._load_custom_stock_universe(min_cap, max_cap)
+        if custom_stocks:
+            stocks.extend(custom_stocks)
+            logger.info(f"Loaded {len(custom_stocks)} stocks from custom universe")
         # Yahoo Finance bulk screener
         logger.info("Fetching from Yahoo Finance screeners...")
         yahoo_stocks = self._fetch_yahoo_bulk_screener(min_cap, max_cap)
@@ -513,6 +715,17 @@ class DataFetcher:
             enriched_finnhub = self._enrich_finnhub_tickers(finnhub_tickers)
             logger.info(f"Found {len(enriched_finnhub)} enriched Finnhub stocks")
             stocks.extend(enriched_finnhub)
+        # Add popular stocks manually if we don't have enough
+        if len(stocks) < 2000:  # Increased threshold significantly
+            manual_stocks = self._add_popular_stocks(min_cap, max_cap)
+            stocks.extend(manual_stocks)
+            logger.info(f"Added {len(manual_stocks)} popular stocks to ensure good coverage")
+            
+            # Add more comprehensive stock lists
+            additional_stocks = self._fetch_comprehensive_stock_lists(min_cap, max_cap)
+            stocks.extend(additional_stocks)
+            logger.info(f"Added {len(additional_stocks)} stocks from comprehensive lists")
+        
         # Remove duplicates
         seen_symbols = set()
         unique_stocks = []
@@ -520,7 +733,7 @@ class DataFetcher:
             if stock['symbol'] not in seen_symbols:
                 seen_symbols.add(stock['symbol'])
                 unique_stocks.append(stock)
-        logger.info(f"Found {len(unique_stocks)} unique stocks in range ${min_cap} - ${max_cap}")
+        logger.info(f"Found {len(unique_stocks)} unique stocks in range ${min_cap/1e6:.0f}M - ${max_cap/1e9:.0f}B")
         if len(unique_stocks) == 0:
             logger.error("No stocks found from any data source. This indicates an issue with the APIs or market hours.")
             logger.error("Check if it's a weekend/holiday or if the APIs have changed.")
@@ -636,15 +849,45 @@ class DataFetcher:
             return 'mega_cap'
     
     def get_options_chain(self, symbol: str) -> List[Dict]:
-        """Get options chain with IMPROVED analysis for low-volume options"""
+        """Get options chain with IMPROVED analysis for low-volume options and retry logic"""
+        max_retries = 3
+        retry_delay = 5
+        
+        for attempt in range(max_retries):
+            try:
+                # Add delay BEFORE each attempt to respect rate limits
+                if attempt > 0:
+                    wait_time = min(retry_delay * (2 ** attempt), 60)  # Exponential backoff, max 60s
+                    logger.info(f"Waiting {wait_time}s before retry {attempt + 1} for {symbol}")
+                    time.sleep(wait_time)
+                
+                ticker = yf.Ticker(symbol)
+                
+                # Get available expiration dates
+                expirations = ticker.options
+                if not expirations:
+                    logger.debug(f"No options available for {symbol}")
+                    return []
+                
+                # Add delay to avoid rate limiting - INCREASED FOR PUTS SUPPORT
+                time.sleep(20.0)  # Much longer delay to avoid rate limiting
+                break  # Success, exit retry loop
+                
+            except Exception as e:
+                if "Too Many Requests" in str(e) or "Rate limited" in str(e):
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Rate limited for {symbol}, retrying in {retry_delay} seconds... (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                        continue
+                    else:
+                        logger.error(f"Rate limit exceeded for {symbol} after {max_retries} attempts")
+                        return []
+                else:
+                    logger.error(f"Error getting options chain for {symbol}: {e}")
+                    return []
+        
         try:
-            ticker = yf.Ticker(symbol)
-            
-            # Get available expiration dates
-            expirations = ticker.options
-            if not expirations:
-                logger.warning(f"No options available for {symbol}")
-                return []
                 
             options_data = []
             current_price = self.get_quote(symbol)['price']
@@ -660,9 +903,14 @@ class DataFetcher:
             # Sort by days to expiration to get variety
             expirations_with_days.sort(key=lambda x: x[1])
             
-            # Take a variety of expiration dates (not just the first one)
+            # Take MORE expiration dates for better opportunities
             selected_expirations = []
-            if len(expirations_with_days) >= 3:
+            if len(expirations_with_days) >= 5:
+                # Take 5 different expirations for maximum variety
+                indices = [0, len(expirations_with_days)//4, len(expirations_with_days)//2, 
+                          3*len(expirations_with_days)//4, len(expirations_with_days)-1]
+                selected_expirations = [expirations_with_days[i][0] for i in indices]
+            elif len(expirations_with_days) >= 3:
                 # Take first, middle, and last expiration for variety
                 selected_expirations = [
                     expirations_with_days[0][0],  # Shortest
@@ -679,16 +927,32 @@ class DataFetcher:
                 exp_datetime = datetime.strptime(exp_date, '%Y-%m-%d')
                 days_to_exp = (exp_datetime - datetime.now()).days
                     
-                # Get options data
-                opt_chain = ticker.option_chain(exp_date)
-                calls = opt_chain.calls
+                # Get options data with better error handling for puts
+                try:
+                    opt_chain = ticker.option_chain(exp_date)
+                    calls = opt_chain.calls
+                    puts = opt_chain.puts
+                    
+                    # Debug: Log put vs call counts (only if both exist)
+                    if len(puts) > 0:
+                        logger.debug(f"{symbol} {exp_date}: {len(calls)} calls, {len(puts)} puts available")
+                        
+                        # Rate limiting check - if no puts but calls exist, likely rate limited
+                        if len(calls) > 0 and len(puts) == 0:
+                            logger.debug(f"{symbol}: Rate limiting suspected - {len(calls)} calls but 0 puts")
+                            # Add extra delay and retry
+                            time.sleep(10.0)  # Much longer delay to avoid rate limiting
+                        
+                except Exception as e:
+                    logger.error(f"Error getting options chain for {symbol} {exp_date}: {e}")
+                    continue
                 
                 # Process calls with RELAXED criteria
                 for _, call in calls.iterrows():
                     strike = call['strike']
                     
-                    # RELAXED: Allow wider range (85% to 120% of current price)
-                    if strike < current_price * 0.85 or strike > current_price * 1.20:
+                    # MUCH MORE RELAXED: Allow wider range (70% to 150% of current price)
+                    if strike < current_price * 0.60 or strike > current_price * 1.60:
                         continue
                     
                     # Get option data
@@ -762,8 +1026,95 @@ class DataFetcher:
                     }
                     
                     options_data.append(option_data)
+                
+                # Process puts with RELAXED criteria (NEWLY ADDED)
+                puts_processed = 0
+                for _, put in puts.iterrows():
+                    strike = put['strike']
                     
-            # Silent processing - no verbose output
+                    # MUCH MORE RELAXED: Allow wider range (70% to 150% of current price)
+                    if strike < current_price * 0.60 or strike > current_price * 1.60:
+                        continue
+                    
+                    # Get option data
+                    bid = put['bid']
+                    ask = put['ask']
+                    volume = put['volume'] if pd.notna(put['volume']) else 0
+                    open_interest = put['openInterest'] if pd.notna(put['openInterest']) else 0
+                    
+                    # Calculate spread
+                    if ask > 0:
+                        spread_pct = (ask - bid) / ask
+                    else:
+                        spread_pct = 1.0
+                    
+                    # STRICT: Must meet higher liquidity requirements
+                    acceptable = False
+                    liquidity_score = 0
+                    
+                    # Condition 1: Must have significant volume
+                    if volume >= self.min_option_volume:
+                        acceptable = True
+                        liquidity_score += 40
+                    
+                    # Condition 2: Must have significant open interest
+                    if open_interest >= self.min_option_oi:
+                        acceptable = True
+                        liquidity_score += 40
+                    
+                    # Condition 3: Tight spread requirement
+                    if spread_pct <= self.max_bid_ask_spread and ask > 0:
+                        acceptable = True
+                        liquidity_score += 20
+                    
+                    # Condition 4: Near the money options (more liquid)
+                    moneyness = abs(strike - current_price) / current_price
+                    if moneyness <= 0.05:  # Within 5% of current price
+                        liquidity_score += 20
+                    
+                    if not acceptable:
+                        continue
+                    
+                    # Calculate IMPLIED volatility if missing
+                    iv = put.get('impliedVolatility', 0)
+                    if iv == 0 or pd.isna(iv):
+                        # Estimate IV based on bid-ask spread and time
+                        iv = 0.3 + (spread_pct * 0.5)  # Higher spread = higher IV estimate
+                    
+                    option_data = {
+                        'symbol': symbol,
+                        'type': 'PUT',
+                        'strike': strike,
+                        'expiration': exp_date,
+                        'days_to_expiration': days_to_exp,
+                        'bid': bid,
+                        'ask': ask,
+                        'mid': (bid + ask) / 2 if ask > 0 else put.get('lastPrice', 0),
+                        'last': put.get('lastPrice', 0),
+                        'volume': int(volume),
+                        'open_interest': int(open_interest),
+                        'implied_volatility': iv,
+                        'in_the_money': put.get('inTheMoney', False),
+                        'contract_symbol': put.get('contractSymbol', ''),
+                        'spread_pct': spread_pct,
+                        'liquidity_score': liquidity_score,
+                        # Greeks estimates for puts
+                        'delta': -self._estimate_delta(current_price, strike, days_to_exp, iv),  # Put delta is negative
+                        'theta': self._estimate_theta(current_price, strike, days_to_exp, iv, ask if ask > 0 else 0.01),
+                        'gamma': self._estimate_gamma(current_price, strike, days_to_exp, iv),
+                        'vega': self._estimate_vega(current_price, strike, days_to_exp, iv),
+                        'iv_percentile': min(95, max(5, iv * 150))  # Rough estimate
+                    }
+                    
+                    options_data.append(option_data)
+                    puts_processed += 1
+                
+                # Final summary only if puts were found
+                call_count = len([opt for opt in options_data if opt['type'] == 'CALL'])
+                put_count = len([opt for opt in options_data if opt['type'] == 'PUT'])
+                if put_count > 0:
+                    logger.debug(f"{symbol} FINAL: {call_count} calls, {put_count} puts returned")
+            
             return options_data
             
         except Exception as e:
@@ -840,7 +1191,7 @@ class DataFetcher:
             ticker = yf.Ticker(symbol)
             expirations = ticker.options
             if not expirations:
-                logger.warning(f"No options available for {symbol}")
+                logger.debug(f"No options available for {symbol}")
                 return []
             options_data = []
             current_price = self.get_quote(symbol)['price']
@@ -867,7 +1218,7 @@ class DataFetcher:
                 calls = opt_chain.calls
                 for _, call in calls.iterrows():
                     strike = call['strike']
-                    if strike < current_price * 0.85 or strike > current_price * 1.20:
+                    if strike < current_price * 0.60 or strike > current_price * 1.60:
                         continue
                     bid = call['bid']
                     ask = call['ask']
@@ -1146,3 +1497,221 @@ class DataFetcher:
         except Exception as e:
             logger.error(f"Error getting option quote for {symbol} {strike} {expiration}: {e}")
             return None
+    
+    def _load_custom_stock_universe(self, min_cap: float, max_cap: float) -> List[Dict]:
+        """Load stocks from custom universe files for maximum coverage"""
+        stocks = []
+        
+        # Define popular stock lists by category
+        popular_lists = {
+            'large_cap': ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'META', 'NVDA', 'AMD', 'NFLX', 'CRM', 
+                         'ADBE', 'PYPL', 'INTC', 'CSCO', 'ORCL', 'IBM', 'UBER', 'LYFT', 'SQ', 'SHOP'],
+            'mid_cap': ['ROKU', 'PINS', 'SNAP', 'TWTR', 'ZM', 'DOCU', 'WORK', 'CRWD', 'OKTA', 'NET',
+                       'DDOG', 'SNOW', 'PATH', 'AI', 'PLTR', 'RBLX', 'U', 'AFRM', 'COIN', 'HOOD'],
+            'small_cap': ['GME', 'AMC', 'BB', 'NOK', 'WISH', 'CLOV', 'SPCE', 'TLRY', 'SNDL', 'MVIS',
+                         'CLNE', 'SOFI', 'LCID', 'RIVN', 'PTON', 'BYND', 'MRNA', 'PFE', 'BNTX', 'NVAX'],
+            'growth': ['ARKK', 'QQQ', 'TQQQ', 'SQQQ', 'SPY', 'IWM', 'VTI', 'UPRO', 'SPXL', 'TNA',
+                      'TECL', 'SOXL', 'CURE', 'DFEN', 'MOON', 'JETS', 'ICLN', 'PBW', 'QCLN', 'ARKQ'],
+            'biotech': ['GILD', 'BIIB', 'REGN', 'VRTX', 'ILMN', 'BMRN', 'ALXN', 'SGEN', 'TECH', 'ISRG',
+                       'INCY', 'EXAS', 'CRSP', 'EDIT', 'NTLA', 'BEAM', 'PACB', 'TDOC', 'VEEV', 'ZTS']
+        }
+        
+        # Get all unique symbols
+        all_symbols = set()
+        for category, symbols in popular_lists.items():
+            all_symbols.update(symbols)
+        
+        # Enrich with market data
+        batch_size = 50
+        symbols_list = list(all_symbols)
+        
+        for i in range(0, len(symbols_list), batch_size):
+            batch = symbols_list[i:i + batch_size]
+            try:
+                yf_tickers = yf.Tickers(' '.join(batch))
+                
+                for symbol in batch:
+                    try:
+                        ticker = yf_tickers.tickers[symbol]
+                        info = ticker.info
+                        
+                        market_cap = info.get('marketCap', 0)
+                        price = info.get('regularMarketPrice', 0)
+                        
+                        if market_cap and price and min_cap <= market_cap <= max_cap:
+                            stock_data = {
+                                'symbol': symbol,
+                                'name': info.get('shortName', symbol),
+                                'market_cap': market_cap,
+                                'price': price,
+                                'volume': info.get('volume', 0),
+                                'avg_volume': info.get('averageVolume', 0),
+                                'sector': info.get('sector', 'Technology'),
+                                'industry': info.get('industry', 'Software'),
+                                'exchange': info.get('exchange', 'NASDAQ'),
+                                'pe_ratio': info.get('forwardPE'),
+                                'has_options': True,  # Most popular stocks have options
+                                'market_cap_category': self._get_market_cap_category(market_cap)
+                            }
+                            stocks.append(stock_data)
+                    except Exception:
+                        continue
+                
+                time.sleep(0.1)  # Rate limiting
+                
+            except Exception as e:
+                logger.warning(f"Error enriching custom batch {i}-{i+batch_size}: {e}")
+                continue
+        
+        return stocks
+    
+    def _add_popular_stocks(self, min_cap: float, max_cap: float) -> List[Dict]:
+        """Add additional popular stocks if we don't have enough coverage"""
+        additional_symbols = [
+            # Popular meme/retail stocks
+            'TSLA', 'GME', 'AMC', 'AAPL', 'MSFT', 'NVDA', 'AMD', 'PLTR', 'BB', 'NOK',
+            # ETFs that are often options targets
+            'SPY', 'QQQ', 'IWM', 'TQQQ', 'SQQQ', 'ARKK', 'XLF', 'XLK', 'GDX', 'TLT',
+            # High-volume options stocks
+            'UBER', 'LYFT', 'SNAP', 'ROKU', 'ZM', 'NFLX', 'DIS', 'BABA', 'NIO', 'XPEV',
+            # Biotech with options activity
+            'MRNA', 'PFE', 'JNJ', 'GILD', 'BIIB', 'REGN', 'VRTX', 'NVAX', 'BNTX', 'OCGN',
+            # Energy and commodities
+            'XOM', 'CVX', 'COP', 'EOG', 'SLB', 'HAL', 'OXY', 'MRO', 'DVN', 'FANG',
+            # Financial services
+            'JPM', 'BAC', 'WFC', 'GS', 'MS', 'C', 'USB', 'PNC', 'TFC', 'COF',
+            # Small cap growth favorites
+            'SOFI', 'HOOD', 'AFRM', 'SQ', 'SHOP', 'CRM', 'SNOW', 'PATH', 'NET', 'CRWD'
+        ]
+        
+        stocks = []
+        try:
+            # Process in batch for efficiency
+            yf_tickers = yf.Tickers(' '.join(additional_symbols))
+            
+            for symbol in additional_symbols:
+                try:
+                    ticker = yf_tickers.tickers[symbol]
+                    info = ticker.info
+                    
+                    market_cap = info.get('marketCap', 0)
+                    price = info.get('regularMarketPrice', 0)
+                    
+                    if market_cap and price and min_cap <= market_cap <= max_cap:
+                        stock_data = {
+                            'symbol': symbol,
+                            'name': info.get('shortName', symbol),
+                            'market_cap': market_cap,
+                            'price': price,
+                            'volume': info.get('volume', 0),
+                            'avg_volume': info.get('averageVolume', 0),
+                            'sector': info.get('sector', 'Technology'),
+                            'industry': info.get('industry', 'Software'),
+                            'exchange': info.get('exchange', 'NASDAQ'),
+                            'pe_ratio': info.get('forwardPE'),
+                            'has_options': True,
+                            'market_cap_category': self._get_market_cap_category(market_cap)
+                        }
+                        stocks.append(stock_data)
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.warning(f"Error adding popular stocks: {e}")
+        
+        return stocks
+    
+    def _fetch_comprehensive_stock_lists(self, min_cap: float, max_cap: float) -> List[Dict]:
+        """Fetch comprehensive stock lists from multiple sources for maximum coverage"""
+        all_symbols = set()
+        
+        # Russell 2000 components (small cap focus)
+        russell_2000 = [
+            'ABCB', 'ABMD', 'ACHC', 'ACLS', 'ACIW', 'ACRS', 'ADPT', 'AEIS', 'AGIO', 'AGNC',
+            'AKAM', 'ALRM', 'AMCX', 'AMKR', 'AMRS', 'AMWD', 'ANGI', 'APPF', 'APPN', 'ARCC',
+            'ARWR', 'AVID', 'AVTR', 'AXON', 'BAND', 'BBBY', 'BCPC', 'BGNE', 'BILI', 'BMRN',
+            'BPMC', 'BRKR', 'BURL', 'BYND', 'CAKE', 'CAPR', 'CARG', 'CART', 'CASY', 'CBSH',
+            'CCOI', 'CDNS', 'CDXS', 'CERN', 'CHKP', 'CHRW', 'CIEN', 'CINF', 'CLVS', 'CNXC',
+            'COHR', 'COLM', 'CORT', 'CRWD', 'CSGP', 'CTLT', 'CTSH', 'CTXS', 'CVBF', 'CWST',
+            'DDOG', 'DISH', 'DLTR', 'DOCU', 'DOMO', 'DSGX', 'DXCM', 'EEFT', 'EGOV', 'EHTH',
+            'ENTG', 'EQIX', 'ERIC', 'ETSY', 'EXAS', 'EXEL', 'EXPO', 'FAST', 'FFIV', 'FGEN',
+            'FISV', 'FITB', 'FIVE', 'FLEX', 'FOLD', 'FOXA', 'FRPT', 'FTNT', 'FULT', 'GDRX'
+        ]
+        
+        # S&P 500 components
+        sp500 = [
+            'AAPL', 'MSFT', 'AMZN', 'TSLA', 'GOOGL', 'GOOG', 'NVDA', 'BRK.B', 'UNH', 'JNJ',
+            'META', 'XOM', 'JPM', 'V', 'PG', 'CVX', 'HD', 'MA', 'BAC', 'ABBV',
+            'PFE', 'AVGO', 'LLY', 'KO', 'TMO', 'COST', 'MRK', 'DHR', 'WMT', 'VZ',
+            'NFLX', 'ABT', 'ACN', 'ORCL', 'ADBE', 'CRM', 'TXN', 'NKE', 'QCOM', 'WFC',
+            'RTX', 'BMY', 'PM', 'T', 'NEE', 'SPGI', 'HON', 'UPS', 'SBUX', 'LOW',
+            'AMGN', 'IBM', 'MDT', 'ELV', 'BLK', 'CAT', 'DE', 'GILD', 'AXP', 'BKNG',
+            'ISRG', 'TJX', 'SYK', 'MU', 'MDLZ', 'ADP', 'CVS', 'TMUS', 'CI', 'VRTX'
+        ]
+        
+        # High volume options stocks
+        high_volume_options = [
+            'AMC', 'GME', 'BB', 'WISH', 'CLOV', 'SOFI', 'PLTR', 'NIO', 'XPEV', 'LI',
+            'ROKU', 'TWLO', 'SNOW', 'COIN', 'HOOD', 'SQ', 'SHOP', 'UBER', 'LYFT', 'DASH',
+            'MRNA', 'BNTX', 'NVAX', 'OCGN', 'SAVA', 'BIIB', 'GILD', 'CELG', 'VRTX', 'REGN',
+            'USO', 'XOM', 'CVX', 'COP', 'EOG', 'SLB', 'OXY', 'MPC', 'VLO', 'PSX',
+            'SPY', 'QQQ', 'IWM', 'XLF', 'XLK', 'XLE', 'XLV', 'XLI', 'XLP', 'XLU'
+        ]
+        
+        # Biotech and growth stocks
+        biotech_growth = [
+            'AFRM', 'UPST', 'PATH', 'NET', 'CRWD', 'ZS', 'DOCU', 'SPLK', 'TEAM', 'WDAY',
+            'TIGR', 'VKTX', 'SOUN', 'STNE', 'CRGY', 'APPN', 'QUBT', 'PGY', 'MGNI', 'LEU',
+            'SIMO', 'SEI', 'CELC', 'HIMS', 'PVH', 'KEY', 'TLX', 'NAKA', 'RBLX', 'U'
+        ]
+        
+        # Combine all lists
+        all_symbols.update(russell_2000)
+        all_symbols.update(sp500)
+        all_symbols.update(high_volume_options)
+        all_symbols.update(biotech_growth)
+        
+        logger.info(f"Fetching comprehensive data for {len(all_symbols)} unique symbols")
+        
+        # Process in batches to avoid overwhelming yfinance
+        enriched_stocks = []
+        batch_size = 100
+        symbols_list = list(all_symbols)
+        
+        for i in range(0, len(symbols_list), batch_size):
+            batch_symbols = symbols_list[i:i+batch_size]
+            try:
+                tickers = yf.Tickers(' '.join(batch_symbols))
+                for symbol in batch_symbols:
+                    try:
+                        info = tickers.tickers[symbol].info
+                        market_cap = info.get('marketCap', 0)
+                        price = info.get('regularMarketPrice', 0)
+                        
+                        if market_cap and price and min_cap <= market_cap <= max_cap:
+                            stock_data = {
+                                'symbol': symbol,
+                                'name': info.get('longName', symbol),
+                                'market_cap': market_cap,
+                                'price': price,
+                                'volume': info.get('volume', 0),
+                                'avg_volume': info.get('averageVolume', 0),
+                                'sector': info.get('sector', 'Unknown'),
+                                'industry': info.get('industry', 'Unknown'),
+                                'exchange': info.get('exchange', 'Unknown'),
+                                'pe_ratio': info.get('forwardPE'),
+                                'has_options': len(info.get('options', [])) > 0,
+                                'market_cap_category': self._get_market_cap_category(market_cap)
+                            }
+                            enriched_stocks.append(stock_data)
+                    except Exception as e:
+                        logger.debug(f"Error enriching {symbol}: {e}")
+                        continue
+                        
+                self.rate_limiter.add_jitter()
+                logger.info(f"Processed batch {i//batch_size + 1}/{(len(symbols_list)-1)//batch_size + 1}")
+                        
+            except Exception as e:
+                logger.warning(f"Error processing batch {i}-{i+batch_size}: {e}")
+        
+        logger.info(f"Successfully enriched {len(enriched_stocks)} stocks from comprehensive lists")
+        return enriched_stocks

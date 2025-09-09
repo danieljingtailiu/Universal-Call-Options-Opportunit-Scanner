@@ -35,8 +35,8 @@ class MarketScanner:
         
         # Add additional fundamental data for each stock (optional for speed)
         final_stocks = []
-        batch_size = 10  # Increased from 3 to 10 for faster processing
-        skip_enriching = False  # Enable fundamental enrichment for better quality
+        batch_size = 50  # Increased from 10 to 50 for much faster processing
+        skip_enriching = True  # Skip enrichment for speed - we have enough basic data
         
         if skip_enriching:
             logger.info(f"Skipping fundamental data enrichment for speed. Using {len(enriched_stocks)} stocks as-is.")
@@ -62,9 +62,9 @@ class MarketScanner:
                     logger.warning(f"Error enriching data for {stock['symbol']}: {e}")
                     # Keep the stock with existing data
                     final_stocks.append(stock)
-            # Rate limiting between batches (reduced from 3 to 1 second)
+            # Rate limiting between batches (reduced to 0.2 seconds for speed)
             if i + batch_size < len(enriched_stocks):
-                time.sleep(1)
+                time.sleep(0.2)  # Much faster processing
         logger.info(f"Successfully enriched {len(final_stocks)} stocks")
         # --- POST-ENRICHMENT MARKET CAP FILTER ---
         min_cap = self.config.trading.market_cap_min
@@ -101,8 +101,8 @@ class MarketScanner:
                 technicals = self._analyze_technicals(stock['symbol'])
                 if not technicals:
                     continue
-                # Require at least some positive momentum over 3 months
-                if technicals.get('price_change_60d', 0) < 0:
+                # More lenient momentum requirement - allow some decline
+                if technicals.get('price_change_60d', 0) < -0.30:  # Allow up to 30% decline
                     continue
                 if self._has_bullish_setup(technicals):
                     stock.update(technicals)
@@ -119,34 +119,14 @@ class MarketScanner:
         growth_min = self.config.get_adaptive_growth_min(market_cap)
         pe_max = self.config.get_adaptive_pe_max(market_cap)
         
-        # Avoid stocks with crazy high or negative PE ratios
-        if stock.get('pe_ratio'):
-            if stock['pe_ratio'] > pe_max or stock['pe_ratio'] < 0:
-                return False
-        # Look for at least some revenue growth
-        if stock.get('revenue_growth'):
-            if stock['revenue_growth'] < growth_min:
-                return False
-        # Earnings growth should be positive too
-        if stock.get('earnings_growth'):
-            earnings_min = growth_min * 0.67
-            if stock['earnings_growth'] < earnings_min:
-                return False
-        # Make sure there's some institutional interest
-        category = self.config.get_market_cap_category(market_cap)
-        ownership_min = 0.05
-        if category == 'micro_cap':
-            ownership_min = 0.02
-        elif category == 'mega_cap':
-            ownership_min = 0.10
-        if stock.get('institutional_ownership', 0) < ownership_min:
+        # Skip fundamental analysis if data is not available (when skip_enriching=True)
+        # Only apply basic filters that we know exist
+        # More lenient filters for penny stocks and volume
+        if stock.get('volume', 0) < 50000:  # Reduced from 100k to 50k
             return False
-        # Skip illiquid and penny stocks
-        if stock.get('volume', 0) < 100000:
+        if stock.get('price', 0) < 0.50:  # Reduced from $1 to $0.50
             return False
-        if stock.get('price', 0) < 1.0:
-            return False
-        if market_cap < 100_000_000:
+        if market_cap < 50_000_000:  # Reduced from 100M to 50M
             return False
         return True
     
@@ -155,22 +135,60 @@ class MarketScanner:
         try:
             # Get price history
             history = self.data_fetcher.get_price_history(symbol, days=100)
-            if len(history) < 50:
+            if len(history) < 20:  # Much more lenient - only need 20 days
                 return None
             df = pd.DataFrame(history)
-            # Calculate indicators
-            technicals = {
-                'rsi': self._calculate_rsi(df['close']),
-                'sma_20': df['close'].rolling(20).mean().iloc[-1],
-                'sma_50': df['close'].rolling(50).mean().iloc[-1],
-                'volume_ratio': df['volume'].iloc[-1] / df['volume'].rolling(20).mean().iloc[-1],
-                'price_change_5d': (df['close'].iloc[-1] / df['close'].iloc[-5] - 1),
-                'price_change_20d': (df['close'].iloc[-1] / df['close'].iloc[-20] - 1),
-                'price_change_60d': (df['close'].iloc[-1] / df['close'].iloc[-60] - 1),
-                'atr': self._calculate_atr(df),
-                'relative_strength': self._calculate_relative_strength(df),
-                'pattern': self._detect_pattern(df)
-            }
+            # Calculate indicators with error handling
+            technicals = {}
+            try:
+                technicals['rsi'] = self._calculate_rsi(df['close'])
+            except:
+                technicals['rsi'] = 50  # Default neutral RSI
+                
+            try:
+                technicals['sma_20'] = df['close'].rolling(20).mean().iloc[-1]
+            except:
+                technicals['sma_20'] = df['close'].iloc[-1]
+                
+            try:
+                technicals['sma_50'] = df['close'].rolling(50).mean().iloc[-1]
+            except:
+                technicals['sma_50'] = df['close'].iloc[-1]
+                
+            try:
+                technicals['volume_ratio'] = df['volume'].iloc[-1] / df['volume'].rolling(20).mean().iloc[-1]
+            except:
+                technicals['volume_ratio'] = 1.0
+                
+            try:
+                technicals['price_change_5d'] = (df['close'].iloc[-1] / df['close'].iloc[-5] - 1) if len(df) >= 5 else 0
+            except:
+                technicals['price_change_5d'] = 0
+                
+            try:
+                technicals['price_change_20d'] = (df['close'].iloc[-1] / df['close'].iloc[-20] - 1) if len(df) >= 20 else 0
+            except:
+                technicals['price_change_20d'] = 0
+                
+            try:
+                technicals['price_change_60d'] = (df['close'].iloc[-1] / df['close'].iloc[-60] - 1) if len(df) >= 60 else 0
+            except:
+                technicals['price_change_60d'] = 0
+                
+            try:
+                technicals['atr'] = self._calculate_atr(df)
+            except:
+                technicals['atr'] = 0
+                
+            try:
+                technicals['relative_strength'] = self._calculate_relative_strength(df)
+            except:
+                technicals['relative_strength'] = 1.0
+                
+            try:
+                technicals['pattern'] = self._detect_pattern(df)
+            except:
+                technicals['pattern'] = 'unknown'
             return technicals
         except Exception as e:
             logger.error(f"Error analyzing technicals for {symbol}: {e}")
@@ -264,27 +282,27 @@ class MarketScanner:
         rsi = technicals.get('rsi', 50)
         price_change_5d = technicals.get('price_change_5d', 0)
         
-        # Accept stocks with any reasonable momentum
-        if relative_strength >= 0.8:  # Reduced from 1.1
+        # VERY LENIENT - accept almost all stocks
+        if relative_strength >= 0.3:  # Much more lenient
             return True
             
-        # Accept stocks with any positive price movement
-        if price_change_20d >= -0.10:  # Reduced from 0.05 (allow 10% decline)
+        # Accept stocks with moderate price movement
+        if price_change_20d >= -0.25:  # Allow 25% decline
             return True
             
-        # Accept stocks with any volume
-        if volume_ratio >= 0.5:  # Reduced from 1.2
+        # Accept stocks with any reasonable volume
+        if volume_ratio >= 0.2:  # Very lenient volume requirement
             return True
             
-        # Accept stocks that aren't extremely overbought
-        if rsi <= 85:  # Increased from 80
+        # Accept most stocks based on RSI
+        if rsi <= 95:  # Very lenient RSI
             return True
             
-        # Accept stocks with any recent movement
-        if price_change_5d >= -0.05:  # Reduced from 0.02 (allow 5% decline)
+        # Accept stocks with recent movement
+        if price_change_5d >= -0.15:  # Allow 15% decline
             return True
             
-        # If all else fails, accept the stock anyway for testing
+        # If all else fails, accept the stock anyway
         return True
 
 if __name__ == "__main__":

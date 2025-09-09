@@ -10,12 +10,12 @@ from typing import Dict, List, Optional
 @dataclass
 class TradingConfig:
     """Trading parameters"""
-    market_cap_min: float = 1_000_000_000  # $1B minimum
+    market_cap_min: float = 100_000_000  # $100M minimum
     market_cap_max: float = 100_000_000_000  # $100B maximum
     
-    min_days_to_expiration: int = 7
+    min_days_to_expiration: int = 14
     max_days_to_expiration: int = 365
-    target_days_to_expiration: int = 45
+    target_days_to_expiration: int = 60
     
     max_position_size: float = 0.05
     max_portfolio_risk: float = 0.20
@@ -29,7 +29,7 @@ class TradingConfig:
     rsi_oversold: float = 30
     rsi_overbought: float = 70
     min_volume: int = 2_000_000
-    min_option_volume: int = 500
+    min_option_volume: int = 5000
     min_option_oi: int = 1000
     
     theta_exit_threshold: float = 0.03
